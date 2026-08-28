@@ -1,6 +1,6 @@
 # openfloor CLI Engineering Guide
 
-This repository owns the private `openfloor` command-line and terminal client. It is a remote client only: openfloor's Worker, D1, Durable Objects, Workflows, Sandbox, R2, and GitHub integration remain authoritative.
+This repository owns the private `openfloor` command-line and terminal client. Agent execution remains remote: openfloor's Worker, D1, Durable Objects, Workflows, Sandbox, R2, and GitHub integration remain authoritative. A local Git bridge may materialize the authoritative candidate in a user's existing clone.
 
 ## Invariants
 
@@ -8,7 +8,7 @@ This repository owns the private `openfloor` command-line and terminal client. I
 - Authenticate only with a Cloudflare Access JWT obtained from `cloudflared`. Never log or persist that JWT.
 - Every server mutation remains subject to server membership and role checks. Preserve concealed `404` behavior.
 - Never retry mutations automatically. A lost response has unknown outcome until a fresh read proves it.
-- Never send provider, GitHub, or repository credentials from this client.
+- Never read, print, or persist provider, GitHub, or repository credentials. Local candidate fetches run `git` with fixed arguments and may use the user's existing Git credential helper without exposing credentials to this process.
 - `Ctrl+C` stops local watching or exits the TUI; it never cancels a remote run.
 - Sanitize remote text before terminal rendering. User content must not emit terminal control sequences.
 - Account onboarding, billing, profile, provider credentials, GitHub installation setup, and account deletion remain browser-owned.
@@ -16,6 +16,10 @@ This repository owns the private `openfloor` command-line and terminal client. I
 - Bare `openfloor` owns first-run recovery: branded splash, explicit Homebrew confirmation on macOS when `cloudflared` is missing, Cloudflare Access login, and browser-owned account onboarding. Persist only setup completion version; never credentials.
 - Session creation always uses account-authorized repository options from the API. Multiple repositories require an explicit interactive or command selection, and one create mutation must never be retried automatically.
 - TUI rows are keyboard-operable with arrows and Enter. Native high-frequency flows may call actions directly; command palette remains the complete fallback surface.
+- Bare `openfloor` detects only a Git worktree with a GitHub `origin` as a local workspace. Unbound workspaces enter repository-matched session creation; non-workspace directories open session selection.
+- Local live sync is receive-only. After explicit confirmation it verifies the fetched ref against the server's remote candidate SHA, switches a clean worktree to its tracking branch, and applies future candidate updates only by fast-forward. Teammates confirm before binding their clone. Dirty, diverged, mismatched, stale, externally modified, or invalid state pauses. Never reset, clean, auto-commit, or push local state; leave the candidate checked out on exit.
+- Workspace-to-session bindings live only in owner-readable CLI config. They do not enter the repository or server state.
+- Floor is the primary session view: team chat left, agents center, queue right, prompt/slash-command bar below. Prompt input owns focus until Tab enters pane navigation. Detail pages remain available through slash commands. Background command output never obscures the floor.
 
 ## Workflow
 

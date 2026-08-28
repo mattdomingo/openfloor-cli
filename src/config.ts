@@ -12,6 +12,7 @@ const configSchema = z.object({
   currentSessionId: z.string().uuid().optional(),
   color: z.boolean().optional(),
   setupVersion: z.literal(CURRENT_SETUP_VERSION).optional(),
+  workspaceSessions: z.record(z.string(), z.string().uuid()).optional(),
 }).strict();
 
 export type CliConfig = z.infer<typeof configSchema>;
@@ -47,6 +48,18 @@ export async function updateConfig(patch: Partial<CliConfig>, path = configPath(
   for (const [key, value] of Object.entries(next)) if (value === undefined) delete (next as any)[key];
   await writeConfig(next, path);
   return next;
+}
+
+export async function bindWorkspaceSession(root: string, sessionId: string, path = configPath()): Promise<CliConfig> {
+  const current = await readConfig(path);
+  return updateConfig({ workspaceSessions: { ...current.workspaceSessions, [root]: sessionId } }, path);
+}
+
+export async function unbindWorkspaceSession(root: string, path = configPath()): Promise<CliConfig> {
+  const current = await readConfig(path);
+  const workspaceSessions = { ...current.workspaceSessions };
+  delete workspaceSessions[root];
+  return updateConfig({ workspaceSessions: Object.keys(workspaceSessions).length ? workspaceSessions : undefined }, path);
 }
 
 export function validateBaseUrl(input: string): string {

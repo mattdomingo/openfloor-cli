@@ -26,3 +26,5 @@ MCP header secrets use `--headers-file <json>` or `--headers-file -` for stdin. 
 JSON output is always one envelope: `{"schemaVersion":1,"ok":true,"data":{}}`. Errors use the same envelope with `ok: false`.
 
 Exit codes: 2 usage, 3 authentication, 4 concealed/not found, 5 conflict/refusal, 6 network/upstream, 130 interruption.
+
+Inside a session TUI, ordinary bottom-bar text creates a queue prompt. Slash commands navigate (`/floor`, `/overview`, `/review`, `/repository`, `/settings`, `/sessions`), send collaboration data (`/chat`, `/queue`), refresh, retry local candidate sync (`/sync`), quit, or execute any existing CLI command with `/run`. Child-command output stays in the background; the floor shows only concise completion or failure state.

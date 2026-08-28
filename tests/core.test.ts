@@ -2,8 +2,8 @@ import { mkdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { configPath, readConfig, validateBaseUrl, writeConfig } from "../src/config.js";
-import { bootstrapMeSchema } from "../src/contracts.js";
+import { bindWorkspaceSession, configPath, readConfig, unbindWorkspaceSession, validateBaseUrl, writeConfig } from "../src/config.js";
+import { bootstrapMeSchema, floorSchema } from "../src/contracts.js";
 import { OpenFloorError, apiError, exitCodeFor } from "../src/errors.js";
 import { resolveId } from "../src/id.js";
 import { redact, sanitizeTerminal } from "../src/sanitize.js";
@@ -23,6 +23,12 @@ describe("trust-boundary helpers", () => {
     const valid = { user: { id: "u", email: "a@example.com", displayName: "A", onboardedAt: 1, future: true }, onboarded: true, future: {} };
     expect(bootstrapMeSchema.parse(valid).future).toEqual({});
     expect(() => bootstrapMeSchema.parse({ user: { id: "u" }, onboarded: true })).toThrow();
+  });
+
+  it("requires repository and candidate fields used by local sync", () => {
+    const base = { revision: 1, autoDispatch: false, autoProvisionAgents: false, autoResolveConflicts: false, agents: [], assignments: [], messages: [], files: [], queue: [], runs: [], latestPreflight: null, review: null };
+    expect(floorSchema.parse({ ...base, repository: { repositoryFullName: "openfloor/app", status: "ready", future: true }, activeCandidate: { branchName: "openfloor/candidate", candidateSha: null, remoteCandidateSha: "a".repeat(40), status: "active", future: true } }).activeCandidate?.remoteCandidateSha).toBe("a".repeat(40));
+    expect(() => floorSchema.parse({ ...base, repository: { repositoryFullName: "openfloor/app", status: "ready" }, activeCandidate: { branchName: "openfloor/candidate", status: "active" } })).toThrow();
   });
 
   it("resolves full UUIDs and unique prefixes only", () => {
@@ -62,5 +68,14 @@ describe("config", () => {
   it("permits HTTP only for loopback", () => {
     expect(validateBaseUrl("http://127.0.0.1:8787/path")).toBe("http://127.0.0.1:8787");
     expect(() => validateBaseUrl("http://example.com")).toThrow(/HTTPS/);
+  });
+
+  it("binds local workspaces without writing into repositories", async () => {
+    const root = join(tmpdir(), `openfloor-binding-${crypto.randomUUID()}`);
+    const path = join(root, "config.json");
+    await bindWorkspaceSession("/projects/example", "12345678-1234-4234-8234-1234567890ab", path);
+    expect(await readConfig(path)).toMatchObject({ workspaceSessions: { "/projects/example": "12345678-1234-4234-8234-1234567890ab" } });
+    await unbindWorkspaceSession("/projects/example", path);
+    expect(await readConfig(path)).not.toHaveProperty("workspaceSessions");
   });
 });
