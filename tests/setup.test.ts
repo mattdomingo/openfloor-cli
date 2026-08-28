@@ -2,7 +2,7 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
-import { existingSetupIsReady, findExecutable, installCloudflared } from "../src/setup.js";
+import { existingSetupIsReady, findExecutable, installCloudflared, logoOrbitPositions } from "../src/setup.js";
 
 describe("first-run setup", () => {
   it("finds executable files only", async () => {
@@ -30,5 +30,14 @@ describe("first-run setup", () => {
 
   it("needs no dependency or authentication for loopback development", async () => {
     await expect(existingSetupIsReady("http://127.0.0.1:8787", "/missing/cloudflared")).resolves.toBe(true);
+  });
+
+  it("animates all three logo dots inside the splash canvas", () => {
+    const first = logoOrbitPositions(0, 92);
+    const next = logoOrbitPositions(1, 92);
+    expect(first).toHaveLength(3);
+    expect(next).not.toEqual(first);
+    expect(next.every(({ x, y }) => x >= 0 && x <= 82 && y >= 0 && y <= 14)).toBe(true);
+    expect(logoOrbitPositions(1, 58, true).every(({ x, y }) => x >= 0 && x <= 52 && y >= 0 && y <= 8)).toBe(true);
   });
 });

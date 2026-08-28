@@ -3,7 +3,7 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { delimiter, join } from "node:path";
 import { promisify } from "node:util";
-import { Box, Text, useApp, useInput } from "ink";
+import { Box, Text, useApp, useInput, useStdout } from "ink";
 import open from "open";
 import React, { useEffect, useState } from "react";
 import { OpenFloorActions } from "./actions.js";
@@ -56,6 +56,7 @@ export async function existingSetupIsReady(baseUrl: string, cloudflaredOverride?
 
 export function SetupWizard({ baseUrl, debug, onComplete, onCancel }: SetupWizardProps): React.ReactElement {
   const { exit } = useApp();
+  const { stdout } = useStdout();
   const [stage, setStage] = useState<Stage>("splash");
   const [tick, setTick] = useState(0);
   const [message, setMessage] = useState("Preparing setup…");
@@ -143,7 +144,7 @@ export function SetupWizard({ baseUrl, debug, onComplete, onCancel }: SetupWizar
     if (input.toLowerCase() === "q" || key.escape) { onCancel(); exit(); }
   });
 
-  if (stage === "splash") return <Splash tick={tick} />;
+  if (stage === "splash") return <Splash tick={tick} width={stdout.columns || 80} />;
   return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={2} paddingY={1}>
     <Text bold color="cyan">openfloor setup</Text>
     <Text>{message}</Text>
@@ -153,17 +154,48 @@ export function SetupWizard({ baseUrl, debug, onComplete, onCancel }: SetupWizar
   </Box>;
 }
 
-function Splash({ tick }: { tick: number }): React.ReactElement {
-  const active = tick % 3;
-  return <Box flexDirection="column" alignItems="center" justifyContent="center" minHeight={12}>
-    <Text color="cyan">┌────────────────────────────────────┐</Text>
-    <Text color="cyan">│                                    │</Text>
-    <Text color="cyan">│   [ <Text color={active === 0 ? "blueBright" : "gray"}>●</Text>  <Text color={active === 1 ? "greenBright" : "gray"}>●</Text>  <Text color={active === 2 ? "magentaBright" : "gray"}>●</Text> ]    <Text bold color="white">openfloor</Text>        │</Text>
-    <Text color="cyan">│                                    │</Text>
-    <Text color="cyan">└────────────────────────────────────┘</Text>
+function Splash({ tick, width }: { tick: number; width: number }): React.ReactElement {
+  const compact = width < 80;
+  const canvasWidth = compact ? 58 : Math.min(92, Math.max(78, width - 2));
+  const positions = logoOrbitPositions(tick, canvasWidth, compact);
+  const colors = ["blueBright", "greenBright", "magentaBright"] as const;
+  const dot = compact ? COMPACT_DOT : DOT;
+  return <Box flexDirection="column" alignItems="center" justifyContent="center" minHeight={compact ? 24 : 32}>
+    <Box position="relative" width={canvasWidth} height={compact ? 12 : 18}>
+      {positions.map((position, index) => <Box key={colors[index]} position="absolute" marginLeft={position.x} marginTop={position.y} flexDirection="column">
+        {dot.map((row, rowIndex) => <Text key={`${rowIndex}:${row}`} bold color={colors[index]!}>{row}</Text>)}
+      </Box>)}
+    </Box>
+    {wordmarkRows().map((row, index) => <Text key={index} bold color={index % 2 ? "white" : "cyan"}>{row}</Text>)}
     <Text>Press Enter to continue</Text>
     <Text dimColor>q quits</Text>
   </Box>;
 }
 
 function spinner(tick: number): string { return ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"][tick % 10]!; }
+
+const DOT = ["  ██████  ", "██████████", "██████████", "  ██████  "] as const;
+const COMPACT_DOT = [" ████ ", "██████", " ████ "] as const;
+const GLYPHS: Record<string, readonly string[]> = {
+  O: [" ███ ", "█   █", "█   █", "█   █", " ███ "],
+  P: ["████ ", "█   █", "████ ", "█    ", "█    "],
+  E: ["█████", "█    ", "████ ", "█    ", "█████"],
+  N: ["█   █", "██  █", "█ █ █", "█  ██", "█   █"],
+  F: ["█████", "█    ", "████ ", "█    ", "█    "],
+  L: ["█    ", "█    ", "█    ", "█    ", "█████"],
+  R: ["████ ", "█   █", "████ ", "█  █ ", "█   █"],
+};
+
+export function logoOrbitPositions(tick: number, canvasWidth = 92, compact = false): Array<{ x: number; y: number }> {
+  const dotWidth = compact ? 6 : 10;
+  const center = (canvasWidth - dotWidth) / 2;
+  const radius = compact ? 19 : Math.min(32, Math.max(24, center - 2));
+  return [0, 1, 2].map((index) => {
+    const angle = tick * (Math.PI / 16) + index * (2 * Math.PI / 3);
+    return { x: Math.round(center + Math.cos(angle) * radius), y: Math.round((compact ? 4 : 7) + Math.sin(angle) * (compact ? 3 : 5)) };
+  });
+}
+
+function wordmarkRows(): string[] {
+  return [0, 1, 2, 3, 4].map((row) => [..."OPENFLOOR"].map((letter) => GLYPHS[letter]?.[row] ?? "     ").join(" "));
+}
