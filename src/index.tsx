@@ -4,7 +4,7 @@ import { CURRENT_SETUP_VERSION } from "./config.js";
 import { exitCodeFor } from "./errors.js";
 import { writeError } from "./output.js";
 import { createRuntime, type GlobalOptions } from "./runtime.js";
-import { enterAlternateScreen, leaveAlternateScreen } from "./terminal.js";
+import { clearAlternateScreen, enterAlternateScreen, leaveAlternateScreen } from "./terminal.js";
 import { detectLocalWorkspace } from "./workspace.js";
 
 async function main(): Promise<void> {
@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   const terminate = () => { cleanup(); process.exit(143); };
   process.once("SIGTERM", terminate);
   try {
-    const [{ render }, { SetupWizard, existingSetupIsReady }] = await Promise.all([import("ink"), import("./setup.js")]);
+    const [{ render }, { SetupWizard, existingSetupIsReady, waitForSetupExit }] = await Promise.all([import("ink"), import("./setup.js")]);
     const setupReady = runtime.config.setupVersion === CURRENT_SETUP_VERSION
       && await existingSetupIsReady(runtime.baseUrl, process.env.OPENFLOOR_CLOUDFLARED);
     if (!setupReady) {
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
         onComplete={() => { completed = true; }}
         onCancel={() => { completed = false; }}
       />, { exitOnCtrlC: true });
-      await setup.waitUntilExit();
+      await waitForSetupExit(setup, clearAlternateScreen);
       if (!completed) return;
       runtime = await createRuntime(tuiOptions);
     }

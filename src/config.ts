@@ -22,6 +22,10 @@ export function configPath(environment: NodeJS.ProcessEnv = process.env): string
   return join(root, "openfloor", "config.json");
 }
 
+export function authHomePath(path = configPath()): string {
+  return join(dirname(path), "cloudflared-home");
+}
+
 export async function readConfig(path = configPath()): Promise<CliConfig> {
   try {
     return configSchema.parse(JSON.parse(await readFile(path, "utf8")));
@@ -60,6 +64,16 @@ export async function unbindWorkspaceSession(root: string, path = configPath()):
   const workspaceSessions = { ...current.workspaceSessions };
   delete workspaceSessions[root];
   return updateConfig({ workspaceSessions: Object.keys(workspaceSessions).length ? workspaceSessions : undefined }, path);
+}
+
+export async function clearIdentityConfig(path = configPath()): Promise<CliConfig> {
+  const current = await readConfig(path);
+  const next: CliConfig = {
+    ...(current.baseUrl === undefined ? {} : { baseUrl: current.baseUrl }),
+    ...(current.color === undefined ? {} : { color: current.color }),
+  };
+  await writeConfig(next, path);
+  return next;
 }
 
 export function validateBaseUrl(input: string): string {

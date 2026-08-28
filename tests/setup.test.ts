@@ -1,10 +1,28 @@
 import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { describe, expect, it } from "vitest";
-import { existingSetupIsReady, findExecutable, installCloudflared, logoOrbitPositions } from "../src/setup.js";
+import { describe, expect, it, vi } from "vitest";
+import { existingSetupIsReady, findExecutable, installCloudflared, logoOrbitPositions, waitForSetupExit } from "../src/setup.js";
 
 describe("first-run setup", () => {
+  it("clears the setup renderer before returning to application startup", async () => {
+    const order: string[] = [];
+    await waitForSetupExit({
+      waitUntilExit: () => { order.push("exit"); return Promise.resolve(); },
+      clear: () => { order.push("clear"); },
+    }, () => { order.push("viewport"); });
+    order.push("main");
+    expect(order).toEqual(["exit", "clear", "viewport", "main"]);
+  });
+
+  it("clears the setup renderer when its exit rejects", async () => {
+    const clear = vi.fn();
+    const clearViewport = vi.fn();
+    await expect(waitForSetupExit({ waitUntilExit: () => Promise.reject(new Error("setup failed")), clear }, clearViewport)).rejects.toThrow("setup failed");
+    expect(clear).toHaveBeenCalledOnce();
+    expect(clearViewport).toHaveBeenCalledOnce();
+  });
+
   it("finds executable files only", async () => {
     const root = join(tmpdir(), `openfloor-setup-${crypto.randomUUID()}`);
     await mkdir(root, { recursive: true });
