@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   const terminate = () => { cleanup(); process.exit(143); };
   process.once("SIGTERM", terminate);
   try {
-    const [{ render }, { SetupWizard, existingSetupIsReady }] = await Promise.all([import("ink"), import("./setup.js")]);
+    const [{ render }, { SetupWizard, existingSetupIsReady, waitForSetupExit }] = await Promise.all([import("ink"), import("./setup.js")]);
     const setupReady = runtime.config.setupVersion === CURRENT_SETUP_VERSION
       && await existingSetupIsReady(runtime.baseUrl, process.env.OPENFLOOR_CLOUDFLARED);
     if (!setupReady) {
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
         onComplete={() => { completed = true; }}
         onCancel={() => { completed = false; }}
       />, { exitOnCtrlC: true });
-      await setup.waitUntilExit();
+      await waitForSetupExit(setup);
       if (!completed) return;
       runtime = await createRuntime(tuiOptions);
     }
