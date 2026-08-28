@@ -51,16 +51,18 @@ describe("TUI", () => {
     instance.stdin.write("n");
     await waitForFrame(instance, "Task");
     expect(instance.lastFrame()).toContain("Task");
-    instance.stdin.write("Test\r");
+    instance.stdin.write("Test");
     await pause();
     instance.stdin.write("\r");
-    await pause();
+    await waitForFrame(instance, "Goal");
     instance.stdin.write("\r");
-    await pause();
-    if (instance.lastFrame()?.includes("Candidate branch name")) { instance.stdin.write("\r"); await pause(); }
+    await waitForFrame(instance, "Candidate branch name");
+    instance.stdin.write("\r");
     await waitForFrame(instance, "Select repository");
     expect(instance.lastFrame()).toContain("Select repository");
-    instance.stdin.write("\u001b[B\r");
+    instance.stdin.write("\u001b[B");
+    await pause();
+    instance.stdin.write("\r");
     await pause();
     expect(instance.lastFrame()).toContain("Repository: openfloor/docs");
     instance.stdin.write("\r");
@@ -74,7 +76,7 @@ function pause(milliseconds = 20): Promise<void> { return new Promise((resolve) 
 
 async function waitForFrame(instance: ReturnType<typeof render>, text: string): Promise<void> {
   for (let attempt = 0; attempt < 100; attempt += 1) {
-    if (instance.lastFrame()?.includes(text)) return;
+    if (instance.lastFrame()?.includes(text)) { await pause(50); return; }
     await pause(10);
   }
   throw new Error(`Timed out waiting for TUI text: ${text}`);
