@@ -12,6 +12,7 @@ import { OpenFloorError } from "./errors.js";
 import { resolveId } from "./id.js";
 import { writeResult } from "./output.js";
 import { createRuntime, requireSession, type GlobalOptions } from "./runtime.js";
+import type { RepositoryOption } from "./contracts.js";
 
 type AnyOptions = Record<string, any>;
 const exec = promisify(execFile);
@@ -126,14 +127,10 @@ function registerSessions(program: Command): void {
     .option("--repository <id>").option("--installation <id>")
     .action(async function (this: Command, options: AnyOptions) {
       await run(this, async ({ actions }) => {
-        const result = await actions.get("/api/account/github/repositories");
-        const repositories = (result.repositories ?? []) as Array<{ id: string; accountInstallationId: string; fullName?: string }>;
-        let repository = repositories[0];
-        if (options.repository) repository = repositories.find((item) => item.id === options.repository || item.id.startsWith(options.repository));
-        if (options.installation) repository = repositories.find((item) => item.accountInstallationId === options.installation && (!options.repository || item.id.startsWith(options.repository)));
-        if (!repository || (!options.repository && repositories.length !== 1)) throw new OpenFloorError("Select a repository with --repository (and --installation when ambiguous)", "usage");
-        return actions.post("/api/sessions", {
-          title: options.title, objective: options.objective ?? null, candidateName: options.candidateName,
+        const repositories = (await actions.repositories()).repositories;
+        const repository = await chooseRepository(repositories, options.repository, options.installation);
+        return actions.createSession({
+          title: options.title, objective: options.objective ?? null, candidateName: options.candidateName ?? null,
           repositoryId: repository.id, accountInstallationId: repository.accountInstallationId,
         });
       });
@@ -415,4 +412,31 @@ async function resolveRollbackSubject(actions: OpenFloorActions, sessionId: stri
   if (scope === "agent") return actions.resolveFloorEntity(sessionId, value, "agent");
   const members = (await actions.session(sessionId)).props.initialMembers;
   return resolveId(value, members, "Member");
+}
+
+export async function chooseRepository(repositories: RepositoryOption[], selector: unknown, installation: unknown): Promise<RepositoryOption> {
+  const installationId = typeof installation === "string" ? installation.trim() : null;
+  const available = installationId ? repositories.filter((item) => item.accountInstallationId === installationId) : repositories;
+  if (!available.length) throw new OpenFloorError("No account-authorized repositories are available. Run `openfloor web github`.", "conflict");
+  if (typeof selector === "string" && selector.trim()) {
+    const value = selector.trim().toLowerCase();
+    const exact = available.filter((item) => item.id.toLowerCase() === value || item.fullName.toLowerCase() === value);
+    if (exact.length === 1) return exact[0]!;
+    const prefix = available.filter((item) => item.id.toLowerCase().startsWith(value));
+    if (prefix.length === 1) return prefix[0]!;
+    throw new OpenFloorError(exact.length > 1 || prefix.length > 1 ? "Repository selection is ambiguous" : "Repository is not available", "usage");
+  }
+  if (available.length === 1) return available[0]!;
+  if (!stdin.isTTY || !stderr.isTTY) throw new OpenFloorError("Multiple repositories are available; pass --repository <owner/name>", "usage");
+  stderr.write("Choose a repository:\n");
+  for (const [index, repository] of available.entries()) {
+    stderr.write(`  ${index + 1}. ${repository.fullName} (${repository.private ? "private" : "public"}, ${repository.defaultBranch})\n`);
+  }
+  const prompt = createInterface({ input: stdin, output: stderr });
+  try {
+    const answer = await prompt.question(`Repository [1-${available.length}]: `);
+    const index = Number(answer) - 1;
+    if (!Number.isInteger(index) || !available[index]) throw new OpenFloorError("Choose a listed repository number", "usage");
+    return available[index];
+  } finally { prompt.close(); }
 }

@@ -7,7 +7,9 @@ import {
   bootstrapSessionSchema,
   eventsResponseSchema,
   floorResponseSchema,
+  repositoryOptionsResponseSchema,
   recordResponseSchema,
+  sessionCreateResponseSchema,
   type FloorSnapshot,
 } from "./contracts.js";
 import { ApiClient } from "./client.js";
@@ -22,6 +24,10 @@ export class OpenFloorActions {
   session(id: string) { return this.client.request(`/api/bootstrap/session/${encodeURIComponent(id)}`, { schema: bootstrapSessionSchema }); }
   floor(id: string) { return this.client.request(`/api/bootstrap/session/${encodeURIComponent(id)}/floor`, { schema: bootstrapFloorSchema }); }
   floorSnapshot(id: string) { return this.client.request(`/api/sessions/${encodeURIComponent(id)}/floor`, { schema: floorResponseSchema }); }
+  repositories() { return this.client.request("/api/account/github/repositories", { schema: repositoryOptionsResponseSchema }); }
+  createSession(input: { title: string; objective: string | null; candidateName: string | null; repositoryId: string; accountInstallationId: string }) {
+    return this.client.request("/api/sessions", { method: "POST", body: input, schema: sessionCreateResponseSchema });
+  }
   events(id: string, runId: string, after = 0) {
     return this.client.request(`/api/sessions/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/events?after=${after}`, { schema: eventsResponseSchema });
   }
