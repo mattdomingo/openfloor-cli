@@ -16,6 +16,10 @@ openfloor
 
 First launch shows the openfloor mark, then checks setup. On macOS, it offers to run `brew install cloudflared` only after explicit confirmation. It opens Cloudflare Access login and browser-owned account onboarding as needed, then starts the TUI. Linux users receive Cloudflare's install instructions when `cloudflared` is missing. Recovery repeats if the dependency, authentication, or onboarding later becomes unavailable.
 
+Run `openfloor` inside a clean Git clone with a GitHub `origin` to create a repository-matched local session. After confirmation, openfloor verifies and checks out the server-created candidate branch, then fast-forwards the worktree whenever shared agent changes integrate. Teammates opening an existing matching session confirm once before their clone is bound. Running outside such a worktree opens session selection.
+
+Local sync is deliberately receive-only: agents still run in openfloor's isolated remote runtime. The CLI never resets, cleans, commits, or pushes. Uncommitted or diverged work pauses sync without overwriting anything. Local human edits are not uploaded to openfloor.
+
 Every action is also scriptable; use `openfloor --help` and `openfloor <group> --help`. Machine output uses `--json` and never mixes progress into stdout.
 
 ## Authentication
@@ -28,19 +32,16 @@ cloudflared access login --no-verbose --app https://app.opnflr.com/api/bootstrap
 
 The CLI keeps the returned JWT only in memory. Later invocations ask `cloudflared access token` for its cached token. Credential expiry, removal, and account switching remain owned by Cloudflare Access and `cloudflared`; there is intentionally no misleading CLI logout.
 
-## TUI keys
+## Session floor
 
-- Arrow keys: select
-- `Tab` / `Shift+Tab` or Left/Right: change tab
-- `Enter`: open selected session, row, or context action
-- `Esc`: return home or close overlay
-- `/`: filter sessions
-- `Ctrl+K`: run any CLI subcommand inside the TUI
-- `r`: refresh
-- `?`: help
-- `q`: quit outside text input
+- Left: team chat
+- Center: live agent floor
+- Right: prompt queue
+- Bottom: prompt and slash-command bar
 
-The command palette accepts commands without the leading `openfloor`, for example `queue add "Fix tests"`.
+Type ordinary text to add work to the queue. Use `/chat <message>` for team chat. `/overview`, `/review`, `/repository`, and `/settings` open detail pages; `/floor` returns; `/sessions` opens session selection; `/commands` lists all shortcuts. `/run <CLI subcommand>` executes an existing command in the background without an output popup.
+
+Prompt input has focus by default. Press `Tab` to enter pane navigation, use arrows to select panes and rows, `Enter` to open a row, and `Esc` to return to the prompt. `/sync` retries paused local synchronization after the worktree is clean.
 
 ## Local development
 
