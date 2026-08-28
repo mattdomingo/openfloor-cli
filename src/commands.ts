@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 import { Command, Option } from "commander";
 import open from "open";
 import { OpenFloorActions } from "./actions.js";
-import { accessToken } from "./auth.js";
+import { accessToken, logoutAccess } from "./auth.js";
 import { updateConfig, writeConfig } from "./config.js";
 import { OpenFloorError } from "./errors.js";
 import { resolveId } from "./id.js";
@@ -80,6 +80,11 @@ function registerAuth(program: Command): void {
     writeResult(await ctx.actions.me(), ctx.options);
   });
   auth.command("status").action(async function (this: Command) { await run(this, ({ actions }) => actions.me()); });
+  auth.command("logout").description("Remove openfloor's local Access session").action(async function (this: Command) {
+    const options = globals(this);
+    await logoutAccess();
+    writeResult({ loggedOut: true }, options);
+  });
 }
 
 function registerConfig(program: Command): void {
