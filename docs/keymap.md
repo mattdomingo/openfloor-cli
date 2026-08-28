@@ -19,6 +19,7 @@
 - `/run <CLI subcommand>`: execute command in background
 - `/refresh`: refresh session
 - `/sync`: retry paused local candidate synchronization
+- `/logout`: remove openfloor's local Access session and exit from any command bar
 - `Ctrl+K`: focus the existing bottom command bar
 - `?`: open the full Help page
 - Home `q` or floor `/quit`: quit

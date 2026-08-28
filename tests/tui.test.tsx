@@ -109,6 +109,27 @@ describe("TUI", () => {
     expect(instance.lastFrame()).toContain("Candidate branch provisioning failed.");
   });
 
+  it("never retries a create mutation with an unknown outcome", async () => {
+    const createSession = vi.fn().mockRejectedValue(new Error("Connection lost after submit"));
+    const actions = {
+      home: () => Promise.resolve({ props: { sessions: [], usage } }),
+      repositories: () => Promise.resolve({ repositories: [repositoryOption()] }),
+      createSession,
+    } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "Sessions");
+    instance.stdin.write("n"); await waitForFrame(instance, "Task");
+    instance.stdin.write("Unknown outcome"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Goal");
+    instance.stdin.write("\r"); await waitForFrame(instance, "Candidate branch name");
+    instance.stdin.write("\r"); await waitForFrame(instance, "Select repository");
+    instance.stdin.write("\r"); await waitForFrame(instance, "Repository: openfloor/app");
+    instance.stdin.write("\r"); await waitForFrame(instance, "outcome may be unknown");
+    instance.stdin.write("r"); await pause(50);
+    expect(createSession).toHaveBeenCalledOnce();
+    expect(instance.lastFrame()).toContain("Connection lost after submit");
+  });
+
   it("renders collaborative floor and routes slash commands through bottom bar", async () => {
     const session = { id: "12345678-1234-4234-8234-1234567890ab", title: "CLI floor", objective: "Ship", role: "owner" as const, createdAt: 1, updatedAt: 1, endedAt: null, archivedAt: null };
     const floor = {
@@ -173,6 +194,19 @@ describe("TUI", () => {
     const lines = instance.lastFrame()?.split("\n") ?? [];
     expect(lines.find((line) => line.includes("Team chat"))).not.toContain("Agent floor");
     expect(lines.find((line) => line.includes("Agent floor"))).not.toContain("Prompt queue");
+  });
+
+  it("supports help and logout from a session command bar", async () => {
+    const logout = vi.fn().mockResolvedValue(undefined);
+    const { actions, client, session } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id, logout }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    instance.stdin.write("?");
+    await waitForFrame(instance, "/help");
+    expect(instance.lastFrame()).toContain("Type ordinary text to queue work");
+    instance.stdin.write("/logout"); await pause(); instance.stdin.write("\r"); await pause(50);
+    expect(logout).toHaveBeenCalledOnce();
   });
 
   it("asks teammates before binding a matching local clone", async () => {
