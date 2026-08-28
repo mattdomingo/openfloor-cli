@@ -25,11 +25,12 @@ export type SetupWizardProps = {
   onCancel: () => void;
 };
 
-export async function waitForSetupExit(instance: { waitUntilExit: () => Promise<unknown>; clear: () => void }): Promise<void> {
+export async function waitForSetupExit(instance: { waitUntilExit: () => Promise<unknown>; clear: () => void }, clearViewport: () => void = () => {}): Promise<void> {
   try {
     await instance.waitUntilExit();
   } finally {
     instance.clear();
+    clearViewport();
   }
 }
 

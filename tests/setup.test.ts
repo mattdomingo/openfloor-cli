@@ -10,15 +10,17 @@ describe("first-run setup", () => {
     await waitForSetupExit({
       waitUntilExit: () => { order.push("exit"); return Promise.resolve(); },
       clear: () => { order.push("clear"); },
-    });
+    }, () => { order.push("viewport"); });
     order.push("main");
-    expect(order).toEqual(["exit", "clear", "main"]);
+    expect(order).toEqual(["exit", "clear", "viewport", "main"]);
   });
 
   it("clears the setup renderer when its exit rejects", async () => {
     const clear = vi.fn();
-    await expect(waitForSetupExit({ waitUntilExit: () => Promise.reject(new Error("setup failed")), clear })).rejects.toThrow("setup failed");
+    const clearViewport = vi.fn();
+    await expect(waitForSetupExit({ waitUntilExit: () => Promise.reject(new Error("setup failed")), clear }, clearViewport)).rejects.toThrow("setup failed");
     expect(clear).toHaveBeenCalledOnce();
+    expect(clearViewport).toHaveBeenCalledOnce();
   });
 
   it("finds executable files only", async () => {

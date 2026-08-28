@@ -6,6 +6,11 @@ export function enterAlternateScreen(): void {
   process.stdout.write("\u001b[?1049h\u001b[?25l");
 }
 
+export function clearAlternateScreen(): void {
+  if (!active || !process.stdout.isTTY) return;
+  process.stdout.write("\u001b[2J\u001b[H");
+}
+
 export function leaveAlternateScreen(): void {
   if (!active) return;
   active = false;

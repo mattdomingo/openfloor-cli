@@ -4,7 +4,7 @@ import { CURRENT_SETUP_VERSION } from "./config.js";
 import { exitCodeFor } from "./errors.js";
 import { writeError } from "./output.js";
 import { createRuntime, type GlobalOptions } from "./runtime.js";
-import { enterAlternateScreen, leaveAlternateScreen } from "./terminal.js";
+import { clearAlternateScreen, enterAlternateScreen, leaveAlternateScreen } from "./terminal.js";
 import { detectLocalWorkspace } from "./workspace.js";
 
 async function main(): Promise<void> {
@@ -42,7 +42,7 @@ async function main(): Promise<void> {
         onComplete={() => { completed = true; }}
         onCancel={() => { completed = false; }}
       />, { exitOnCtrlC: true });
-      await waitForSetupExit(setup);
+      await waitForSetupExit(setup, clearAlternateScreen);
       if (!completed) return;
       runtime = await createRuntime(tuiOptions);
     }
