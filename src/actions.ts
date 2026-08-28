@@ -7,7 +7,15 @@ import {
   bootstrapSessionSchema,
   eventsResponseSchema,
   floorResponseSchema,
+  credentialResponseSchema,
+  credentialsResponseSchema,
+  githubDevicePollSchema,
+  githubDeviceStartSchema,
+  onboardingCompleteResponseSchema,
+  onboardingProfileResponseSchema,
   repositoryOptionsResponseSchema,
+  reviewContributionResponseSchema,
+  reviewContributionsSchema,
   recordResponseSchema,
   sessionCreateResponseSchema,
   type FloorSnapshot,
@@ -30,6 +38,25 @@ export class OpenFloorActions {
   }
   events(id: string, runId: string, after = 0) {
     return this.client.request(`/api/sessions/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/events?after=${after}`, { schema: eventsResponseSchema });
+  }
+  reviewContributions(id: string, status: "active" | "rolled_back" = "active") {
+    return this.client.request(`/api/sessions/${encodeURIComponent(id)}/review/contributions?status=${status}&limit=100`, { schema: reviewContributionsSchema });
+  }
+  reviewContribution(id: string, runId: string) {
+    return this.client.request(`/api/sessions/${encodeURIComponent(id)}/review/contributions/${encodeURIComponent(runId)}`, { schema: reviewContributionResponseSchema });
+  }
+  credentials() { return this.client.request("/api/account/credentials", { schema: credentialsResponseSchema }); }
+  connectCredential(provider: string, body: Record<string, string>) { return this.client.request(`/api/account/credentials/${encodeURIComponent(provider)}`, { method: "PUT", body, schema: credentialResponseSchema }); }
+  disconnectCredential(provider: string, kind: string) { return this.client.request(`/api/account/credentials/${encodeURIComponent(provider)}?kind=${encodeURIComponent(kind)}`, { method: "DELETE", schema: recordResponseSchema }); }
+  saveOnboardingProfile(input: { firstName: string; lastName: string; githubHandle: string }) {
+    const form = new FormData(); form.set("firstName", input.firstName); form.set("lastName", input.lastName); form.set("githubHandle", input.githubHandle);
+    return this.client.request("/api/account/onboarding", { method: "PATCH", form, schema: onboardingProfileResponseSchema });
+  }
+  startGithubDevice() { return this.client.request("/api/account/github/device", { method: "POST", schema: githubDeviceStartSchema }); }
+  pollGithubDevice(deviceCode: string) { return this.client.request("/api/account/github/device", { method: "PUT", body: { deviceCode }, schema: githubDevicePollSchema }); }
+  completeOnboarding(input: { firstName: string; lastName: string; githubHandle: string }) {
+    const form = new FormData(); form.set("firstName", input.firstName); form.set("lastName", input.lastName); form.set("githubHandle", input.githubHandle); form.set("plan", "free"); form.set("quantity", "1"); form.set("returnTo", "/home");
+    return this.client.request("/api/account/onboarding", { method: "POST", form, schema: onboardingCompleteResponseSchema });
   }
 
   get(path: string) { return this.client.request(path, { schema: recordResponseSchema }); }

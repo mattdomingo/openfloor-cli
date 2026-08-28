@@ -2,7 +2,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { render } from "ink-testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { startTui } from "../src/tui.js";
+import { orderedQueue, startTui } from "../src/tui.js";
 import type { OpenFloorActions } from "../src/actions.js";
 import type { ApiClient } from "../src/client.js";
 
@@ -45,13 +45,18 @@ describe("TUI", () => {
     instance.stdin.write("set");
     await waitForFrame(instance, "/settings");
     instance.stdin.write("\r");
-    await waitForFrame(instance, "CLI settings");
+    await pause();
+    expect(instance.lastFrame()).toContain("sessions › /settings");
+    instance.stdin.write("\r");
+    await waitForFrame(instance, "Authentication: Cloudflare Access");
     expect(instance.lastFrame()).toContain("Cloudflare Access in an openfloor-only local cache");
     instance.stdin.write("\u001b");
     await waitForFrame(instance, "Sessions");
     instance.stdin.write("\u000b");
     await waitForFrame(instance, "/new");
     instance.stdin.write("\u001b[B");
+    await pause();
+    instance.stdin.write("\r");
     await pause();
     instance.stdin.write("\r");
     await waitForFrame(instance, "CLI settings");
@@ -152,11 +157,14 @@ describe("TUI", () => {
     instances.push(instance);
     await waitForFrame(instance, "Prompt queue");
     expect(instance.lastFrame()).toContain("Team chat");
+    expect(instance.lastFrame()).toContain("Live teammate prompts");
     expect(instance.lastFrame()).toContain("Agent floor");
     expect(instance.lastFrame()).toContain("floor ›");
 
     instance.stdin.write("\t");
     await waitForFrame(instance, "› Team chat");
+    instance.stdin.write("\u001b[C");
+    await waitForFrame(instance, "› Live teammate prompts");
     instance.stdin.write("\u001b[C");
     await waitForFrame(instance, "› Agent floor");
     instance.stdin.write("\r");
@@ -172,7 +180,7 @@ describe("TUI", () => {
     expect(instance.lastFrame()).not.toContain("Command output");
 
     instance.stdin.write("/overview"); await pause(); instance.stdin.write("\r");
-    await waitForFrame(instance, "/overview");
+    await waitForFrame(instance, "Members");
     expect(instance.lastFrame()).toContain("Members");
 
     instance.stdin.write("/commands"); await pause(); instance.stdin.write("\r");
@@ -207,6 +215,102 @@ describe("TUI", () => {
     expect(instance.lastFrame()).toContain("Type ordinary text to queue work");
     instance.stdin.write("/logout"); await pause(); instance.stdin.write("\r"); await pause(50);
     expect(logout).toHaveBeenCalledOnce();
+  });
+
+  it("autocompletes and runs direct command aliases without an output overlay", async () => {
+    const runCommand = vi.fn().mockResolvedValue(undefined);
+    const { actions, client, session } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id, runCommand }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    instance.stdin.write("/inv"); await waitForFrame(instance, "/invite"); instance.stdin.write("\r"); await pause();
+    expect(instance.lastFrame()).toContain("floor › /invite");
+    instance.stdin.write("\r"); await pause(60);
+    expect(runCommand).toHaveBeenCalledWith("invite show", session.id, "http://127.0.0.1:9");
+    expect(instance.lastFrame()).not.toContain("Command output");
+  });
+
+  it("uses contextual exit navigation and omits repository navigation", async () => {
+    const { actions, client, session } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    instance.stdin.write("/overview"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Members");
+    instance.stdin.write("/exit"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Prompt queue");
+    instance.stdin.write("/exit"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Sessions");
+    instance.stdin.write("?"); await waitForFrame(instance, "Ctrl+C exits locally");
+    expect(instance.lastFrame()).not.toContain("/repository");
+  });
+
+  it("creates an agent from the agent pane", async () => {
+    const { actions, client, session, post } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    instance.stdin.write("\t"); await waitForFrame(instance, "› Team chat");
+    instance.stdin.write("\u001b[C"); await waitForFrame(instance, "› Live teammate prompts");
+    instance.stdin.write("\u001b[C"); await waitForFrame(instance, "› Agent floor");
+    instance.stdin.write("\u001b[B"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Create agent");
+    instance.stdin.write("Reviewer"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Role");
+    instance.stdin.write("Code reviewer"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Task");
+    instance.stdin.write("Review changes"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Owner");
+    instance.stdin.write("\r"); await waitForFrame(instance, "Provider");
+    instance.stdin.write("\r"); await waitForFrame(instance, "Credential");
+    instance.stdin.write("\r"); await waitForFrame(instance, "Model");
+    instance.stdin.write("\r"); await waitForFrame(instance, "Enter creates once");
+    instance.stdin.write("\r"); await pause(80);
+    expect(post).toHaveBeenCalledWith(`/api/sessions/${session.id}/agents`, expect.objectContaining({ name: "Reviewer", role: "Code reviewer", task: "Review changes", provider: "openai" }));
+  });
+
+  it("toggles owner session settings after Tab enters the page", async () => {
+    const { actions, client, session } = floorHarness();
+    const patch = vi.fn().mockResolvedValue({}); Object.assign(actions, { patch });
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    instance.stdin.write("/settings"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Auto-dispatch");
+    instance.stdin.write("\t"); await pause(); instance.stdin.write("\r"); await pause(60);
+    expect(patch).toHaveBeenCalledWith(`/api/sessions/${session.id}/routing`, { autoDispatch: false });
+  });
+
+  it("opens review changes by file and renders one diff", async () => {
+    const { actions, client, session, floor } = floorHarness({ review: { pullRequest: { url: "https://github.com/openfloor/app/pull/1" } } });
+    Object.assign(actions, {
+      floor: () => Promise.resolve({ props: { initialFloor: floor } }),
+      reviewContributions: () => Promise.resolve({ items: [reviewContribution(false)], nextCursor: null, engineers: [], agents: [] }),
+      reviewContribution: () => Promise.resolve({ contribution: reviewContribution(true) }),
+    });
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    instance.stdin.write("/review"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "src/app.ts");
+    instance.stdin.write("\t"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "+ const answer = 42;");
+    expect(instance.lastFrame()).toContain("wrap on");
+  });
+
+  it("pastes credentials without rendering or persisting the secret", async () => {
+    const connectCredential = vi.fn().mockResolvedValue({ credential: credentialSummary("openai", "api_key") });
+    const actions = { home: () => Promise.resolve({ props: { sessions: [], usage } }), credentials: () => Promise.resolve({ credentials: [] }), connectCredential, disconnectCredential: vi.fn() } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "Type / for commands");
+    instance.stdin.write("/"); await pause(); instance.stdin.write("credentials"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "OpenAI API key");
+    instance.stdin.write("\r"); await waitForFrame(instance, "Paste credential."); instance.stdin.write("sk-test-super-secret"); await pause();
+    expect(instance.lastFrame()).not.toContain("sk-test-super-secret");
+    instance.stdin.write("\r"); await waitForFrame(instance, "sent directly"); instance.stdin.write("\r"); await pause(80);
+    expect(connectCredential).toHaveBeenCalledWith("openai", { apiKey: "sk-test-super-secret" });
+    expect(instance.lastFrame()).not.toContain("sk-test-super-secret");
+  });
+
+  it("sorts live queue work above terminal results", () => {
+    const { floor } = floorHarness();
+    const values = [
+      { ...floor.queue[0]!, id: "done", position: 0, status: "completed" },
+      { ...floor.queue[0]!, id: "live", position: 3, status: "running" },
+      { ...floor.queue[0]!, id: "failed", position: 1, status: "failed" },
+      { ...floor.queue[0]!, id: "queued", position: 2, status: "queued" },
+    ];
+    expect(orderedQueue({ ...floor, queue: values }).map((item) => item.id)).toEqual(["queued", "live", "done", "failed"]);
   });
 
   it("asks teammates before binding a matching local clone", async () => {
@@ -292,6 +396,8 @@ describe("TUI", () => {
 
 function localWorkspace() { return { root: "/projects/app", remoteName: "origin", remoteUrl: "git@github.com:openfloor/app.git", repositoryFullName: "openfloor/app" }; }
 function repositoryOption() { return { id: "repo-1", accountInstallationId: "install-1", fullName: "openfloor/app", private: true, defaultBranch: "main" }; }
+function credentialSummary(provider: "openai", kind: "api_key") { return { provider, kind, fingerprint: "cret", validatedAt: 1, createdAt: 1, updatedAt: 1, monthSpendMicroUsd: 0, monthlyLimitMicroUsd: null, monthInputTokens: 0, monthOutputTokens: 0 }; }
+function reviewContribution(withDiff: boolean) { return { runId: "run-1", queueItemId: "queue-1", agentId: "agent-1", agentName: "Builder", agentOwnerUserId: "user-1", integratedAt: 2, rollbackStatus: null, rollbackFailureReason: null, canRollback: true, prompts: [{ id: "prompt-1", authorUserId: "user-1", authorName: "Matt", text: "Build feature", createdAt: 1 }], files: [{ id: "file-1", path: "src/app.ts", changeKind: "modified", additions: 1, deletions: 0, summary: "Add answer", ...(withDiff ? { diff: [{ type: "add" as const, text: "const answer = 42;" }] } : {}) }] }; }
 
 function floorHarness(overrides: Record<string, unknown> = {}) {
   const session = { id: "12345678-1234-4234-8234-1234567890ab", title: "CLI floor", objective: "Ship", role: "owner" as const, createdAt: 1, updatedAt: 1, endedAt: null, archivedAt: null };
@@ -303,13 +409,14 @@ function floorHarness(overrides: Record<string, unknown> = {}) {
     runs: [{ id: "run-1", queueItemId: "queue-1", agentId: "agent-1", agentName: "Builder", status: "running", model: "gpt", summary: null, finalResponse: null, createdAt: 1, updatedAt: 2, checks: [], files: [] }],
     repository: null, activeCandidate: null, latestPreflight: null, review: null, ...overrides,
   };
+  const post = vi.fn().mockResolvedValue({});
   const actions = {
     home: () => Promise.resolve({ props: { sessions: [session], usage } }),
     session: () => Promise.resolve({ props: { session, initialMembers: [{ id: "user-1", displayName: "Matt", role: "owner", joinedAt: 1, online: true }] } }),
-    floor: () => Promise.resolve({ props: { initialFloor: floor } }), post: vi.fn().mockResolvedValue({}),
+    floor: () => Promise.resolve({ props: { initialFloor: floor } }), post,
   } as unknown as OpenFloorActions;
   const client = { baseUrl: "http://127.0.0.1:9", token: () => Promise.resolve(null) } as unknown as ApiClient;
-  return { actions, client, session, floor };
+  return { actions, client, session, floor, post };
 }
 
 function pause(milliseconds = 20): Promise<void> { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
@@ -319,5 +426,5 @@ async function waitForFrame(instance: ReturnType<typeof render>, text: string): 
     if (instance.lastFrame()?.includes(text)) { await pause(50); return; }
     await pause(10);
   }
-  throw new Error(`Timed out waiting for TUI text: ${text}`);
+  throw new Error(`Timed out waiting for TUI text: ${text}\nLast frame:\n${instance.lastFrame()}`);
 }

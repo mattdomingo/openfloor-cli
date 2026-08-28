@@ -18,7 +18,6 @@
     "pack:check": "npm run check && npm pack --dry-run"
   },
   "dependencies": {
-    "@inkjs/ui": "^2.0.0",
     "@tanstack/react-query": "^5.90.0",
     "cli-table3": "^0.6.5",
     "commander": "^14.0.0",
