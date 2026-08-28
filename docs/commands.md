@@ -19,6 +19,8 @@ Global flags: `--session`, `--base-url`, `--json`, `--quiet`, `--no-color`, `--d
 
 IDs may be complete UUIDs or unique prefixes of at least eight characters. `--session` overrides the locally selected session. Long text accepts a positional value, `--file`, or piped stdin where offered.
 
+`sessions create` fetches account-authorized GitHub repositories. One repository is selected automatically. Multiple repositories prompt in a TTY; noninteractive use must pass `--repository <owner/name-or-id>` and may pass `--installation <id>` when needed. Zero available repositories directs the user to browser-owned GitHub settings.
+
 MCP header secrets use `--headers-file <json>` or `--headers-file -` for stdin. They are never accepted in ordinary command arguments, printed, or persisted locally.
 
 JSON output is always one envelope: `{"schemaVersion":1,"ok":true,"data":{}}`. Errors use the same envelope with `ok: false`.

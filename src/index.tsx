@@ -1,5 +1,6 @@
 import { OpenFloorActions } from "./actions.js";
 import { buildProgram } from "./commands.js";
+import { CURRENT_SETUP_VERSION } from "./config.js";
 import { exitCodeFor } from "./errors.js";
 import { writeError } from "./output.js";
 import { createRuntime, type GlobalOptions } from "./runtime.js";
@@ -22,15 +23,30 @@ async function main(): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error("TUI requires an interactive terminal. Use `openfloor --help` for subcommands.");
   }
-  const runtime = await createRuntime(tuiOptions);
+  let runtime = await createRuntime(tuiOptions);
   if (runtime.options.color === false || runtime.config.color === false) process.env.NO_COLOR = "1";
-  const actions = new OpenFloorActions(runtime.client);
   enterAlternateScreen();
   const cleanup = () => leaveAlternateScreen();
   const terminate = () => { cleanup(); process.exit(143); };
   process.once("SIGTERM", terminate);
   try {
-    const [{ render }, { startTui }] = await Promise.all([import("ink"), import("./tui.js")]);
+    const [{ render }, { SetupWizard, existingSetupIsReady }] = await Promise.all([import("ink"), import("./setup.js")]);
+    const setupReady = runtime.config.setupVersion === CURRENT_SETUP_VERSION
+      && await existingSetupIsReady(runtime.baseUrl, process.env.OPENFLOOR_CLOUDFLARED);
+    if (!setupReady) {
+      let completed = false;
+      const setup = render(<SetupWizard
+        baseUrl={runtime.baseUrl}
+        {...(runtime.options.debug === undefined ? {} : { debug: runtime.options.debug })}
+        onComplete={() => { completed = true; }}
+        onCancel={() => { completed = false; }}
+      />, { exitOnCtrlC: true });
+      await setup.waitUntilExit();
+      if (!completed) return;
+      runtime = await createRuntime(tuiOptions);
+    }
+    const [{ startTui }] = await Promise.all([import("./tui.js")]);
+    const actions = new OpenFloorActions(runtime.client);
     const instance = render(startTui({ actions, client: runtime.client, baseUrl: runtime.baseUrl, ...(runtime.config.currentSessionId ? { initialSessionId: runtime.config.currentSessionId } : {}) }), { exitOnCtrlC: true });
     await instance.waitUntilExit();
   } finally {

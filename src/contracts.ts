@@ -2,6 +2,27 @@ import { z } from "zod";
 
 const loose = z.object({}).passthrough();
 
+export const usageSchema = z.object({
+  plan: z.enum(["free", "pro", "max", "enterprise"]),
+  planStatus: z.enum(["inactive", "active", "past_due", "canceled"]),
+  effectivePlan: z.enum(["free", "pro", "max", "enterprise"]),
+  seconds: z.number().nonnegative(),
+  // Server-side Infinity serializes as null in JSON. Null therefore means
+  // unlimited for both fields, never missing data.
+  limitHours: z.number().nonnegative().nullable(),
+  limitSeats: z.number().nonnegative().nullable(),
+}).passthrough();
+
+export const repositoryOptionSchema = z.object({
+  id: z.string(),
+  accountInstallationId: z.string(),
+  fullName: z.string(),
+  private: z.boolean(),
+  defaultBranch: z.string(),
+}).passthrough();
+
+export const repositoryOptionsResponseSchema = z.object({ repositories: z.array(repositoryOptionSchema) }).passthrough();
+
 export const appUserSchema = z.object({
   id: z.string(), email: z.string(), displayName: z.string(), onboardedAt: z.number().nullable(),
 }).passthrough();
@@ -9,6 +30,12 @@ export const appUserSchema = z.object({
 export const sessionSchema = z.object({
   id: z.string(), title: z.string(), objective: z.string().nullable(), role: z.enum(["owner", "member"]),
   createdAt: z.number(), updatedAt: z.number(), endedAt: z.number().nullable(), archivedAt: z.number().nullable().optional(),
+}).passthrough();
+
+export const sessionCreateResponseSchema = z.object({
+  session: sessionSchema,
+  setupStatus: z.enum(["ready", "failed"]),
+  setupError: z.string().nullable(),
 }).passthrough();
 
 export const memberSchema = z.object({
@@ -39,7 +66,7 @@ export const floorSchema = z.object({
 }).passthrough();
 
 export const bootstrapMeSchema = z.object({ user: appUserSchema, onboarded: z.boolean() }).passthrough();
-export const bootstrapHomeSchema = z.object({ props: z.object({ user: appUserSchema, sessions: z.array(sessionSchema), usage: loose }).passthrough() }).passthrough();
+export const bootstrapHomeSchema = z.object({ props: z.object({ user: appUserSchema, sessions: z.array(sessionSchema), usage: usageSchema }).passthrough() }).passthrough();
 export const bootstrapSessionSchema = z.object({ props: z.object({ user: appUserSchema, session: sessionSchema, initialMembers: z.array(memberSchema) }).passthrough() }).passthrough();
 export const bootstrapFloorSchema = z.object({ props: z.object({ user: appUserSchema, session: sessionSchema, initialMembers: z.array(memberSchema), initialFloor: floorSchema }).passthrough() }).passthrough();
 export const floorResponseSchema = z.object({ floor: floorSchema }).passthrough();
@@ -50,5 +77,8 @@ export const recordResponseSchema = loose;
 export type AppUser = z.infer<typeof appUserSchema>;
 export type SessionSummary = z.infer<typeof sessionSchema>;
 export type SessionMember = z.infer<typeof memberSchema>;
+export type Usage = z.infer<typeof usageSchema>;
+export type RepositoryOption = z.infer<typeof repositoryOptionSchema>;
+export type SessionCreateResponse = z.infer<typeof sessionCreateResponseSchema>;
 export type FloorSnapshot = z.infer<typeof floorSchema>;
 export type RunActivityEvent = z.infer<typeof eventsResponseSchema>["events"][number];

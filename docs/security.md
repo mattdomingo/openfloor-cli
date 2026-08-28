@@ -4,4 +4,6 @@ Cloudflare Access remains identity authority. `cloudflared` owns cached credenti
 
 Loopback HTTP intentionally skips Access for openfloor's server-only development identity. Non-loopback HTTP is refused. Redirects are never followed, response bodies are bounded, mutations are never retried, and all remote terminal text loses ANSI and unsafe control bytes. Debug output contains method and path only; token-shaped values are redacted.
 
-Config contains only base URL, selected session UUID, and color preference. File and directory modes are `0600` and `0700`. Provider secrets, GitHub credentials, repository clones, and Access JWTs never belong in config.
+First-run macOS dependency installation requires a visible `y` confirmation. The CLI resolves an executable Homebrew path and invokes it with the fixed argument array `install`, `cloudflared`; no shell or remote script is used. Linux setup opens Cloudflare's installation documentation. `OPENFLOOR_CLOUDFLARED` remains an explicit executable override and fails closed when invalid.
+
+Config contains only base URL, selected session UUID, color preference, and setup version. File and directory modes are `0600` and `0700`. Provider secrets, GitHub credentials, repository clones, and Access JWTs never belong in config.

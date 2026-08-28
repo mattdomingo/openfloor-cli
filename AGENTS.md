@@ -13,9 +13,12 @@ This repository owns the private `openfloor` command-line and terminal client. I
 - Sanitize remote text before terminal rendering. User content must not emit terminal control sequences.
 - Account onboarding, billing, profile, provider credentials, GitHub installation setup, and account deletion remain browser-owned.
 - Support macOS and Linux with Node.js 22.13 or newer. Windows is outside v1.
+- Bare `openfloor` owns first-run recovery: branded splash, explicit Homebrew confirmation on macOS when `cloudflared` is missing, Cloudflare Access login, and browser-owned account onboarding. Persist only setup completion version; never credentials.
+- Session creation always uses account-authorized repository options from the API. Multiple repositories require an explicit interactive or command selection, and one create mutation must never be retried automatically.
+- TUI rows are keyboard-operable with arrows and Enter. Native high-frequency flows may call actions directly; command palette remains the complete fallback surface.
 
 ## Workflow
 
 Run `npm run check` before handoff. Any durable architecture, security, command-contract, release, or workflow decision must update this file and `docs/architecture.md` in the same change.
 
-Tested API contract source: openfloor commit `f5fe93fca745331170a45eb3c3cd68af7412237f` (2026-08-28).
+Tested API contract source: openfloor commit `f6cdccc3074b841d07fcbc4a3731b925699fbb43` (2026-08-28).
