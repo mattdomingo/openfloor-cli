@@ -1,0 +1,45 @@
+{
+  "name": "@openfloor/cli",
+  "version": "0.1.0",
+  "description": "Private command-line and terminal interface for openfloor",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "bin": { "openfloor": "dist/index.js" },
+  "files": ["dist", "README.md", "docs"],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsx src/index.tsx",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm run lint && npm test && npm run build",
+    "pack:check": "npm run check && npm pack --dry-run"
+  },
+  "dependencies": {
+    "@inkjs/ui": "^2.0.0",
+    "@tanstack/react-query": "^5.90.0",
+    "cli-table3": "^0.6.5",
+    "commander": "^14.0.0",
+    "ink": "^6.5.0",
+    "open": "^10.2.0",
+    "react": "^19.2.0",
+    "ws": "^8.18.0",
+    "zod": "^4.1.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.0",
+    "@types/node": "^22.19.0",
+    "@types/react": "^19.2.0",
+    "@types/ws": "^8.18.0",
+    "eslint": "^9.39.0",
+    "eslint-plugin-react-hooks": "^7.0.1",
+    "ink-testing-library": "^4.0.0",
+    "tsx": "^4.20.0",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.48.0",
+    "vitest": "^4.0.0"
+  }
+}
