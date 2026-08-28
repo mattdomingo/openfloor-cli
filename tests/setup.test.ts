@@ -8,7 +8,7 @@ describe("first-run setup", () => {
   it("clears the setup renderer before returning to application startup", async () => {
     const order: string[] = [];
     await waitForSetupExit({
-      waitUntilExit: async () => { order.push("exit"); },
+      waitUntilExit: () => { order.push("exit"); return Promise.resolve(); },
       clear: () => { order.push("clear"); },
     });
     order.push("main");
@@ -17,7 +17,7 @@ describe("first-run setup", () => {
 
   it("clears the setup renderer when its exit rejects", async () => {
     const clear = vi.fn();
-    await expect(waitForSetupExit({ waitUntilExit: async () => { throw new Error("setup failed"); }, clear })).rejects.toThrow("setup failed");
+    await expect(waitForSetupExit({ waitUntilExit: () => Promise.reject(new Error("setup failed")), clear })).rejects.toThrow("setup failed");
     expect(clear).toHaveBeenCalledOnce();
   });
 

@@ -28,7 +28,36 @@ describe("TUI", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     instance.stdin.write("?");
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(instance.lastFrame()).toContain("Home: arrows select");
+    expect(instance.lastFrame()).toContain("↑↓ select · Enter opens · n creates · / starts a command.");
+  });
+
+  it("uses inline slash suggestions instead of a home filter popup", async () => {
+    const actions = { home: () => Promise.resolve({ props: { sessions: [], usage } }) } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "Type / for commands");
+
+    instance.stdin.write("/");
+    await waitForFrame(instance, "/new");
+    expect(instance.lastFrame()).not.toContain("Filter sessions");
+    instance.stdin.write("set");
+    await waitForFrame(instance, "/settings");
+    instance.stdin.write("\r");
+    await waitForFrame(instance, "CLI settings");
+    expect(instance.lastFrame()).toContain("Cloudflare Access in an openfloor-only local cache");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "Sessions");
+  });
+
+  it("logs out through the Sessions command bar", async () => {
+    const logout = vi.fn().mockResolvedValue(undefined);
+    const actions = { home: () => Promise.resolve({ props: { sessions: [], usage } }) } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787", logout }));
+    instances.push(instance);
+    await waitForFrame(instance, "Type / for commands");
+    instance.stdin.write("/"); await pause(); instance.stdin.write("logout"); await pause(); instance.stdin.write("\r");
+    await pause(50);
+    expect(logout).toHaveBeenCalledOnce();
   });
 
   it("creates a session through native repository selection", async () => {
@@ -51,6 +80,7 @@ describe("TUI", () => {
     instance.stdin.write("n");
     await waitForFrame(instance, "Task");
     expect(instance.lastFrame()).toContain("Task");
+    expect(instance.lastFrame()).not.toContain("Enterprise plan");
     instance.stdin.write("Test");
     await waitForFrame(instance, "Test");
     instance.stdin.write("\r");
