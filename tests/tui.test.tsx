@@ -1,3 +1,5 @@
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { render } from "ink-testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startTui } from "../src/tui.js";
@@ -5,7 +7,7 @@ import type { OpenFloorActions } from "../src/actions.js";
 import type { ApiClient } from "../src/client.js";
 
 const instances: Array<ReturnType<typeof render>> = [];
-afterEach(() => { for (const instance of instances.splice(0)) instance.unmount(); });
+afterEach(() => { for (const instance of instances.splice(0)) instance.unmount(); vi.unstubAllEnvs(); });
 const usage = { plan: "pro" as const, planStatus: "inactive" as const, effectivePlan: "enterprise" as const, seconds: 2_707, limitHours: null, limitSeats: null };
 
 describe("TUI", () => {
@@ -47,6 +49,12 @@ describe("TUI", () => {
     expect(instance.lastFrame()).toContain("Cloudflare Access in an openfloor-only local cache");
     instance.stdin.write("\u001b");
     await waitForFrame(instance, "Sessions");
+    instance.stdin.write("\u000b");
+    await waitForFrame(instance, "/new");
+    instance.stdin.write("\u001b[B");
+    await pause();
+    instance.stdin.write("\r");
+    await waitForFrame(instance, "CLI settings");
   });
 
   it("logs out through the Sessions command bar", async () => {
@@ -185,7 +193,71 @@ describe("TUI", () => {
     expect(instance.lastFrame()).toContain("openfloor/demo/candidate/task-12345678");
     expect(instance.lastFrame()).toContain("aaaaaaaaaaaa");
   });
+
+  it("opens an archived bound workspace session directly", async () => {
+    const { actions, client, session, floor } = floorHarness({
+      repository: { repositoryFullName: "openfloor/app", status: "ready" },
+      activeCandidate: { branchName: "openfloor/demo/candidate/task-12345678", candidateSha: "a".repeat(40), remoteCandidateSha: "a".repeat(40), status: "active" },
+    });
+    const archived = { ...session, archivedAt: 2 };
+    Object.assign(actions, {
+      home: () => Promise.resolve({ props: { sessions: [archived], usage } }),
+      session: () => Promise.resolve({ props: { session: archived, initialMembers: [] } }),
+      floor: () => Promise.resolve({ props: { initialFloor: floor } }),
+    });
+    const workspace = localWorkspace();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", workspace, initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    expect(instance.lastFrame()).toContain("CLI floor");
+    expect(instance.lastFrame()).not.toContain("New local session");
+  });
+
+  it("clears an ended binding and opens local session creation", async () => {
+    vi.stubEnv("XDG_CONFIG_HOME", join(tmpdir(), `openfloor-tui-${crypto.randomUUID()}`));
+    const { actions, client, session, floor } = floorHarness();
+    const ended = { ...session, endedAt: 2 };
+    Object.assign(actions, {
+      home: () => Promise.resolve({ props: { sessions: [ended], usage } }),
+      session: () => Promise.resolve({ props: { session: ended, initialMembers: [] } }),
+      floor: () => Promise.resolve({ props: { initialFloor: floor } }),
+      repositories: () => Promise.resolve({ repositories: [repositoryOption()] }),
+    });
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", workspace: localWorkspace(), initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "New local session · openfloor/app");
+    expect(instance.lastFrame()).toContain("Task");
+  });
+
+  it("clears a missing binding and opens local session creation", async () => {
+    vi.stubEnv("XDG_CONFIG_HOME", join(tmpdir(), `openfloor-tui-${crypto.randomUUID()}`));
+    const { actions, client, session } = floorHarness();
+    Object.assign(actions, {
+      home: () => Promise.resolve({ props: { sessions: [], usage } }),
+      repositories: () => Promise.resolve({ repositories: [repositoryOption()] }),
+    });
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", workspace: localWorkspace(), initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "New local session · openfloor/app");
+    expect(instance.lastFrame()).toContain("Task");
+  });
+
+  it("clears a repository-mismatched binding and opens creation", async () => {
+    vi.stubEnv("XDG_CONFIG_HOME", join(tmpdir(), `openfloor-tui-${crypto.randomUUID()}`));
+    const { actions, client, session, floor } = floorHarness({ repository: { repositoryFullName: "openfloor/other", status: "ready" } });
+    Object.assign(actions, {
+      floor: () => Promise.resolve({ props: { initialFloor: floor } }),
+      repositories: () => Promise.resolve({ repositories: [repositoryOption()] }),
+    });
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", workspace: localWorkspace(), initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "New local session · openfloor/app");
+    expect(instance.lastFrame()).toContain("repository no longer matches");
+  });
 });
+
+function localWorkspace() { return { root: "/projects/app", remoteName: "origin", remoteUrl: "git@github.com:openfloor/app.git", repositoryFullName: "openfloor/app" }; }
+function repositoryOption() { return { id: "repo-1", accountInstallationId: "install-1", fullName: "openfloor/app", private: true, defaultBranch: "main" }; }
 
 function floorHarness(overrides: Record<string, unknown> = {}) {
   const session = { id: "12345678-1234-4234-8234-1234567890ab", title: "CLI floor", objective: "Ship", role: "owner" as const, createdAt: 1, updatedAt: 1, endedAt: null, archivedAt: null };

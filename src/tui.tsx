@@ -38,6 +38,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   const [selectedSession, setSelectedSession] = useState(0);
   const [page, setPage] = useState<Page>(initialSessionId ? "floor" : workspace ? "create-session" : "sessions");
   const [homeCommandActive, setHomeCommandActive] = useState(false);
+  const [workspaceStartupResolved, setWorkspaceStartupResolved] = useState(!workspace || !initialSessionId);
   const [notice, setNotice] = useState<string | null>(workspace ? `Local workspace: ${workspace.repositoryFullName}` : null);
   const [connection, setConnection] = useState<ConnectionStatus>("closed");
   const [localSync, setLocalSync] = useState<LocalSync>("none");
@@ -57,8 +58,8 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   const queryClient = useQueryClient();
 
   const homeQuery = useQuery({ queryKey: ["home"], queryFn: () => actions.home() });
-  const sessionQuery = useQuery({ queryKey: ["session", sessionId], queryFn: () => actions.session(sessionId!), enabled: Boolean(sessionId) });
-  const floorQuery = useQuery({ queryKey: ["floor", sessionId], queryFn: () => actions.floor(sessionId!), enabled: Boolean(sessionId), refetchInterval: connection === "live" ? false : 10_000 });
+  const sessionQuery = useQuery({ queryKey: ["session", sessionId], queryFn: () => actions.session(sessionId!), enabled: Boolean(sessionId && workspaceStartupResolved) });
+  const floorQuery = useQuery({ queryKey: ["floor", sessionId], queryFn: () => actions.floor(sessionId!), enabled: Boolean(sessionId && workspaceStartupResolved), refetchInterval: connection === "live" ? false : 10_000 });
   const treeQuery = useQuery({ queryKey: ["tree", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/repository/tree`), enabled: Boolean(sessionId && page === "repository") });
   const skillsQuery = useQuery({ queryKey: ["skills", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/skills`), enabled: Boolean(sessionId && page === "settings") });
   const mcpQuery = useQuery({ queryKey: ["mcp", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/mcp-servers`), enabled: Boolean(sessionId && page === "settings") });
@@ -73,18 +74,19 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
     if (!workspace || !homeQuery.data || startupHandled.current) return;
     const bound = initialSessionId ? homeQuery.data.props.sessions.find((session) => session.id === initialSessionId) : undefined;
     startupHandled.current = true;
-    if (bound && bound.endedAt == null) return;
+    if (bound && bound.endedAt == null) { void Promise.resolve().then(() => setWorkspaceStartupResolved(true)); return; }
     void Promise.resolve().then(async () => {
       if (initialSessionId) await unbindWorkspaceSession(workspace.root);
       setWorkspaceSyncEnabled(false);
       setBoundSessionId(null);
       setSessionId(null);
       setPage("create-session");
+      setWorkspaceStartupResolved(true);
     });
   }, [homeQuery.data, initialSessionId, workspace]);
 
   useEffect(() => {
-    if (!sessionId) return;
+    if (!sessionId || !workspaceStartupResolved) return;
     const presence = new PresenceClient(client, sessionId);
     presence.on("status", setConnection);
     presence.on("event", (event: PresenceEvent) => {
@@ -107,7 +109,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
     void presence.connect().catch((error) => setNotice(error instanceof Error ? error.message : String(error)));
     (globalThis as Record<string, unknown>).__openfloorPresence = presence;
     return () => { presence.sendDraft("", false); presence.close(); delete (globalThis as Record<string, unknown>).__openfloorPresence; };
-  }, [boundSessionId, client, queryClient, sessionId, workspace]);
+  }, [boundSessionId, client, queryClient, sessionId, workspace, workspaceStartupResolved]);
 
   const sessions = useMemo(() => {
     const values = homeQuery.data?.props.sessions ?? [];
@@ -169,7 +171,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   }, [floorQuery.error, sessionQuery.error, workspace, workspaceSyncEnabled]);
 
   const enterSession = async (id: string, bindWorkspace = false) => {
-    setSessionId(id); setPage("floor"); setFloorFocus("prompt"); setFloorDetail(null); setHomeCommandActive(false);
+    setWorkspaceStartupResolved(true); setSessionId(id); setPage("floor"); setFloorFocus("prompt"); setFloorDetail(null); setHomeCommandActive(false);
     await updateConfig({ currentSessionId: id });
     setWorkspaceSyncEnabled(Boolean(workspace && bindWorkspace));
     if (workspace && bindWorkspace) { await bindWorkspaceSession(workspace.root, id); setBoundSessionId(id); }
