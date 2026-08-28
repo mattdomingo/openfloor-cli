@@ -2,7 +2,7 @@
 
 `auth`, `config`, `sessions`, `invite`, `members`, `agents`, `assignments`, `routing`, `queue`, `chat`, `files`, `runs`, `conflicts`, `repository`, `skills`, `mcp`, `review`, `web`, and `doctor` mirror openfloor's existing member-authorized APIs.
 
-- `auth login|status`; `doctor`; `config show|set|clear`
+- `auth login|status|logout`; `doctor`; `config show|set|clear`
 - `sessions list|show|use|create|objective|archive|unarchive|lock|unlock|end|delete|leave`
 - `invite show|rotate|revoke|join`; `members list|remove|restore`
 - `agents list|show|create|edit|pause|resume|stop|delete|pause-all|resume-all|stop-all`
@@ -27,4 +27,4 @@ JSON output is always one envelope: `{"schemaVersion":1,"ok":true,"data":{}}`. E
 
 Exit codes: 2 usage, 3 authentication, 4 concealed/not found, 5 conflict/refusal, 6 network/upstream, 130 interruption.
 
-Inside a session TUI, ordinary bottom-bar text creates a queue prompt. Slash commands navigate (`/floor`, `/overview`, `/review`, `/repository`, `/settings`, `/sessions`), send collaboration data (`/chat`, `/queue`), refresh, retry local candidate sync (`/sync`), quit, or execute any existing CLI command with `/run`. Child-command output stays in the background; the floor shows only concise completion or failure state.
+On Sessions, `/new`, `/settings`, `/help`, `/logout`, `/sessions`, `/refresh`, `/run`, and `/quit` appear as inline filtered suggestions above the persistent bottom bar. `/` starts command entry and never filters session rows. Inside a session, ordinary bottom-bar text creates a queue prompt. Slash commands navigate (`/floor`, `/overview`, `/review`, `/repository`, `/settings`, `/sessions`), send collaboration data (`/chat`, `/queue`), refresh, retry local candidate sync (`/sync`), quit, or execute any existing CLI command with `/run`. Child-command output stays in the background; the floor shows only concise completion or failure state.

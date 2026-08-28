@@ -14,9 +14,9 @@ npm install -g ./openfloor-cli-0.1.0.tgz
 openfloor
 ```
 
-First launch shows the openfloor mark, then checks setup. On macOS, it offers to run `brew install cloudflared` only after explicit confirmation. It opens Cloudflare Access login and browser-owned account onboarding as needed, then starts the TUI. Linux users receive Cloudflare's install instructions when `cloudflared` is missing. Recovery repeats if the dependency, authentication, or onboarding later becomes unavailable.
+First launch shows the openfloor mark, then checks setup. On macOS, it offers to run `brew install cloudflared` only after explicit confirmation. It opens Cloudflare Access login and browser-owned account onboarding as needed, clears the setup screen, then starts the TUI. Linux users receive Cloudflare's install instructions when `cloudflared` is missing. Recovery repeats if the dependency, authentication, or onboarding later becomes unavailable.
 
-Run `openfloor` inside a clean Git clone with a GitHub `origin` to create a repository-matched local session. After confirmation, openfloor verifies and checks out the server-created candidate branch, then fast-forwards the worktree whenever shared agent changes integrate. Teammates opening an existing matching session confirm once before their clone is bound. Running outside such a worktree opens session selection.
+Run `openfloor` inside a clean Git clone with a GitHub `origin` to enter repository-matched session creation. A valid active or archived binding instead opens its floor directly. Ended, missing, inaccessible, and repository-mismatched bindings are cleared back into creation. After confirmation, openfloor verifies and checks out the server-created candidate branch, then fast-forwards the worktree whenever shared agent changes integrate. Teammates opening an existing matching session confirm once before their clone is bound. Running outside such a worktree opens Sessions, and `/sessions` remains available from every floor.
 
 Local sync is deliberately receive-only: agents still run in openfloor's isolated remote runtime. The CLI never resets, cleans, commits, or pushes. Uncommitted or diverged work pauses sync without overwriting anything. Local human edits are not uploaded to openfloor.
 
@@ -30,7 +30,9 @@ Every action is also scriptable; use `openfloor --help` and `openfloor <group> -
 cloudflared access login --no-verbose --app https://app.opnflr.com/api/bootstrap/me
 ```
 
-The CLI keeps the returned JWT only in memory. Later invocations ask `cloudflared access token` for its cached token. Credential expiry, removal, and account switching remain owned by Cloudflare Access and `cloudflared`; there is intentionally no misleading CLI logout.
+The CLI keeps the returned JWT only in memory. `cloudflared` stores its Access state under an owner-only openfloor directory, isolated from `~/.cloudflared`. Later invocations ask it for the cached token. `openfloor auth logout` or TUI `/logout` removes only this isolated cache plus setup/session/workspace identity state, preserves display and server preferences, and exits. It does not revoke the remote Cloudflare session. Existing users authenticate once after upgrading to the isolated cache.
+
+Sessions uses a bottom command bar. Press `/` for inline commands such as `/new`, `/settings`, `/help`, `/logout`, and `/run`; `/` no longer filters the session list. Creation, binding, settings, help, and item details are full terminal pages rather than popups.
 
 ## Session floor
 
