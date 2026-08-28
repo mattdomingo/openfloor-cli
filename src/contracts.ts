@@ -58,10 +58,22 @@ export const runSchema = z.object({
   checks: z.array(loose), files: z.array(loose),
 }).passthrough();
 
+export const repositorySchema = z.object({
+  repositoryFullName: z.string(),
+  status: z.enum(["connected", "ready", "revoked", "inaccessible", "externally_modified", "disconnected"]),
+}).passthrough();
+
+export const candidateSchema = z.object({
+  branchName: z.string(),
+  candidateSha: z.string().nullable(),
+  remoteCandidateSha: z.string().nullable(),
+  status: z.enum(["creating", "active", "merged", "abandoned", "creation_failed"]),
+}).passthrough();
+
 export const floorSchema = z.object({
   revision: z.number(), autoDispatch: z.boolean(), autoProvisionAgents: z.boolean(), autoResolveConflicts: z.boolean(),
   agents: z.array(agentSchema), assignments: z.array(loose), messages: z.array(loose), files: z.array(loose),
-  queue: z.array(queueItemSchema), runs: z.array(runSchema), repository: loose.nullable(), activeCandidate: loose.nullable(),
+  queue: z.array(queueItemSchema), runs: z.array(runSchema), repository: repositorySchema.nullable(), activeCandidate: candidateSchema.nullable(),
   latestPreflight: loose.nullable(), review: loose.nullable(),
 }).passthrough();
 
