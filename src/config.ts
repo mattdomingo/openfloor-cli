@@ -5,11 +5,13 @@ import { z } from "zod";
 import { OpenFloorError } from "./errors.js";
 
 export const DEFAULT_BASE_URL = "https://app.opnflr.com";
+export const CURRENT_SETUP_VERSION = 1;
 
 const configSchema = z.object({
   baseUrl: z.string().url().optional(),
   currentSessionId: z.string().uuid().optional(),
   color: z.boolean().optional(),
+  setupVersion: z.literal(CURRENT_SETUP_VERSION).optional(),
 }).strict();
 
 export type CliConfig = z.infer<typeof configSchema>;
