@@ -1,0 +1,82 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { basename } from "node:path";
+import {
+  bootstrapFloorSchema,
+  bootstrapHomeSchema,
+  bootstrapMeSchema,
+  bootstrapSessionSchema,
+  eventsResponseSchema,
+  floorResponseSchema,
+  recordResponseSchema,
+  type FloorSnapshot,
+} from "./contracts.js";
+import { ApiClient } from "./client.js";
+import { resolveId } from "./id.js";
+import { sanitizeTerminal } from "./sanitize.js";
+
+export class OpenFloorActions {
+  constructor(readonly client: ApiClient) {}
+
+  me() { return this.client.request("/api/bootstrap/me", { schema: bootstrapMeSchema }); }
+  home() { return this.client.request("/api/bootstrap/home", { schema: bootstrapHomeSchema }); }
+  session(id: string) { return this.client.request(`/api/bootstrap/session/${encodeURIComponent(id)}`, { schema: bootstrapSessionSchema }); }
+  floor(id: string) { return this.client.request(`/api/bootstrap/session/${encodeURIComponent(id)}/floor`, { schema: bootstrapFloorSchema }); }
+  floorSnapshot(id: string) { return this.client.request(`/api/sessions/${encodeURIComponent(id)}/floor`, { schema: floorResponseSchema }); }
+  events(id: string, runId: string, after = 0) {
+    return this.client.request(`/api/sessions/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/events?after=${after}`, { schema: eventsResponseSchema });
+  }
+
+  get(path: string) { return this.client.request(path, { schema: recordResponseSchema }); }
+  async text(path: string): Promise<string> {
+    const response = await this.client.request<Response>(path, { raw: true });
+    return sanitizeTerminal(await response.text());
+  }
+  post(path: string, body?: unknown) { return this.client.request(path, { method: "POST", ...(body === undefined ? {} : { body }), schema: recordResponseSchema }); }
+  put(path: string, body?: unknown) { return this.client.request(path, { method: "PUT", ...(body === undefined ? {} : { body }), schema: recordResponseSchema }); }
+  patch(path: string, body?: unknown) { return this.client.request(path, { method: "PATCH", ...(body === undefined ? {} : { body }), schema: recordResponseSchema }); }
+  delete(path: string, body?: unknown) { return this.client.request(path, { method: "DELETE", ...(body === undefined ? {} : { body }), schema: recordResponseSchema }); }
+
+  async resolveSession(input: string): Promise<string> {
+    const sessions = (await this.home()).props.sessions;
+    return resolveId(input, sessions, "Session");
+  }
+
+  async resolveFloorEntity(sessionId: string, input: string, kind: "agent" | "queue" | "run" | "file" | "conflict"): Promise<string> {
+    const floor = (await this.floor(sessionId)).props.initialFloor;
+    const values = kind === "agent" ? floor.agents
+      : kind === "queue" ? floor.queue
+      : kind === "run" ? floor.runs
+      : kind === "file" ? floor.files as Array<{ id: string }>
+      : ((floor.review as any)?.conflicts ?? []) as Array<{ id: string }>;
+    return resolveId(input, values, kind[0]!.toUpperCase() + kind.slice(1));
+  }
+
+  async uploadFiles(sessionId: string, paths: string[]): Promise<Record<string, unknown>> {
+    const form = new FormData();
+    for (const path of paths) {
+      const bytes = await readFile(path);
+      form.append("files", new File([bytes], basename(path)));
+    }
+    return this.client.request(`/api/sessions/${encodeURIComponent(sessionId)}/files`, { method: "POST", form, schema: recordResponseSchema });
+  }
+
+  async download(sessionId: string, fileId: string, destination: string): Promise<{ path: string; bytes: number }> {
+    const response = await this.client.request<Response>(`/api/sessions/${encodeURIComponent(sessionId)}/files/${encodeURIComponent(fileId)}`, { raw: true });
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    await writeFile(destination, bytes, { flag: "wx" });
+    return { path: destination, bytes: bytes.byteLength };
+  }
+
+  async readTextInput(value?: string, file?: string): Promise<string> {
+    if (file) return readFile(file, "utf8");
+    if (value != null) return value;
+    if (process.stdin.isTTY) return "";
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+    return Buffer.concat(chunks).toString("utf8");
+  }
+}
+
+export function floorFromResult(result: Record<string, unknown>): FloorSnapshot | null {
+  return result.floor && typeof result.floor === "object" ? result.floor as FloorSnapshot : null;
+}
