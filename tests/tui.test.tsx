@@ -28,7 +28,7 @@ describe("TUI", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     instance.stdin.write("?");
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(instance.lastFrame()).toContain("Arrow keys navigate");
+    expect(instance.lastFrame()).toContain("Home: arrows select");
   });
 
   it("creates a session through native repository selection", async () => {
@@ -52,7 +52,7 @@ describe("TUI", () => {
     await waitForFrame(instance, "Task");
     expect(instance.lastFrame()).toContain("Task");
     instance.stdin.write("Test");
-    await pause();
+    await waitForFrame(instance, "Test");
     instance.stdin.write("\r");
     await waitForFrame(instance, "Goal");
     instance.stdin.write("\r");
@@ -70,7 +70,111 @@ describe("TUI", () => {
     expect(createSession).toHaveBeenCalledWith(expect.objectContaining({ title: "Test", repositoryId: "repo-2" }));
     expect(instance.lastFrame()).toContain("Candidate branch provisioning failed.");
   });
+
+  it("renders collaborative floor and routes slash commands through bottom bar", async () => {
+    const session = { id: "12345678-1234-4234-8234-1234567890ab", title: "CLI floor", objective: "Ship", role: "owner" as const, createdAt: 1, updatedAt: 1, endedAt: null, archivedAt: null };
+    const floor = {
+      revision: 1, autoDispatch: true, autoProvisionAgents: true, autoResolveConflicts: true,
+      agents: [{ id: "agent-1", name: "Builder", role: "Engineer", task: "Implement", ownerUserId: "user-1", ownerName: "Matt", provider: "openai", model: null, pausedAt: null, kind: null }],
+      assignments: [], messages: [{ id: "message-1", authorName: "Matt", recipientUserId: null, text: "hello" }], files: [],
+      queue: [{ id: "queue-1", agentId: "agent-1", agentName: "Builder", position: 0, status: "running", prompts: [{ id: "prompt-1", authorName: "Matt", text: "Fix it", createdAt: 1 }] }],
+      runs: [{ id: "run-1", queueItemId: "queue-1", agentId: "agent-1", agentName: "Builder", status: "running", model: "gpt", summary: null, finalResponse: null, createdAt: 1, updatedAt: 2, checks: [], files: [] }],
+      repository: null, activeCandidate: null, latestPreflight: null, review: null,
+    };
+    const post = vi.fn().mockResolvedValue({});
+    const actions = {
+      home: () => Promise.resolve({ props: { sessions: [session], usage } }),
+      session: () => Promise.resolve({ props: { session, initialMembers: [{ id: "user-1", displayName: "Matt", role: "owner", joinedAt: 1, online: true }] } }),
+      floor: () => Promise.resolve({ props: { initialFloor: floor } }),
+      post,
+    } as unknown as OpenFloorActions;
+    const client = { baseUrl: "http://127.0.0.1:9", token: () => Promise.resolve(null) } as unknown as ApiClient;
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    expect(instance.lastFrame()).toContain("Team chat");
+    expect(instance.lastFrame()).toContain("Agent floor");
+    expect(instance.lastFrame()).toContain("floor ›");
+
+    instance.stdin.write("\t");
+    await waitForFrame(instance, "› Team chat");
+    instance.stdin.write("\u001b[C");
+    await waitForFrame(instance, "› Agent floor");
+    instance.stdin.write("\r");
+    await waitForFrame(instance, "Owner: Matt");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "Prompt queue");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "floor ›");
+
+    instance.stdin.write("Run tests"); await pause(); instance.stdin.write("\r");
+    await pause(80);
+    expect(post).toHaveBeenCalledWith(`/api/sessions/${session.id}/queue`, { prompt: "Run tests", agentId: null });
+    expect(instance.lastFrame()).not.toContain("Command output");
+
+    instance.stdin.write("/overview"); await pause(); instance.stdin.write("\r");
+    await waitForFrame(instance, "/overview");
+    expect(instance.lastFrame()).toContain("Members");
+
+    instance.stdin.write("/commands"); await pause(); instance.stdin.write("\r");
+    await waitForFrame(instance, "/sync");
+
+    instance.stdin.write("/sessions"); await pause(); instance.stdin.write("\r");
+    await waitForFrame(instance, "Sessions");
+    expect(instance.lastFrame()).toContain("CLI floor");
+  });
+
+  it("stacks floor panes on narrow terminals", async () => {
+    const { actions, client, session } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    Object.defineProperty(instance.stdout, "columns", { value: 80, configurable: true });
+    instance.stdout.emit("resize");
+    await pause(50);
+    const lines = instance.lastFrame()?.split("\n") ?? [];
+    expect(lines.find((line) => line.includes("Team chat"))).not.toContain("Agent floor");
+    expect(lines.find((line) => line.includes("Agent floor"))).not.toContain("Prompt queue");
+  });
+
+  it("asks teammates before binding a matching local clone", async () => {
+    const { actions, client, session, floor } = floorHarness({
+      repository: { repositoryFullName: "openfloor/app", status: "ready" },
+      activeCandidate: { branchName: "openfloor/demo/candidate/task-12345678", candidateSha: "a".repeat(40), remoteCandidateSha: "a".repeat(40), status: "active" },
+    });
+    Object.assign(actions, { repositories: () => Promise.resolve({ repositories: [{ id: "repo-1", accountInstallationId: "install-1", fullName: "openfloor/app", private: true, defaultBranch: "main" }] }), floor: () => Promise.resolve({ props: { initialFloor: floor } }) });
+    const workspace = { root: "/projects/app", remoteName: "origin", remoteUrl: "git@github.com:openfloor/app.git", repositoryFullName: "openfloor/app" };
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", workspace }));
+    instances.push(instance);
+    await waitForFrame(instance, "Task");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "Sessions");
+    instance.stdin.write("\r");
+    await waitForFrame(instance, "Enable local live sync?");
+    expect(instance.lastFrame()).toContain(session.title);
+    expect(instance.lastFrame()).toContain("openfloor/demo/candidate/task-12345678");
+    expect(instance.lastFrame()).toContain("aaaaaaaaaaaa");
+  });
 });
+
+function floorHarness(overrides: Record<string, unknown> = {}) {
+  const session = { id: "12345678-1234-4234-8234-1234567890ab", title: "CLI floor", objective: "Ship", role: "owner" as const, createdAt: 1, updatedAt: 1, endedAt: null, archivedAt: null };
+  const floor = {
+    revision: 1, autoDispatch: true, autoProvisionAgents: true, autoResolveConflicts: true,
+    agents: [{ id: "agent-1", name: "Builder", role: "Engineer", task: "Implement", ownerUserId: "user-1", ownerName: "Matt", provider: "openai", model: null, pausedAt: null, kind: null }],
+    assignments: [], messages: [{ id: "message-1", authorName: "Matt", recipientUserId: null, text: "hello" }], files: [],
+    queue: [{ id: "queue-1", agentId: "agent-1", agentName: "Builder", position: 0, status: "running", prompts: [{ id: "prompt-1", authorName: "Matt", text: "Fix it", createdAt: 1 }] }],
+    runs: [{ id: "run-1", queueItemId: "queue-1", agentId: "agent-1", agentName: "Builder", status: "running", model: "gpt", summary: null, finalResponse: null, createdAt: 1, updatedAt: 2, checks: [], files: [] }],
+    repository: null, activeCandidate: null, latestPreflight: null, review: null, ...overrides,
+  };
+  const actions = {
+    home: () => Promise.resolve({ props: { sessions: [session], usage } }),
+    session: () => Promise.resolve({ props: { session, initialMembers: [{ id: "user-1", displayName: "Matt", role: "owner", joinedAt: 1, online: true }] } }),
+    floor: () => Promise.resolve({ props: { initialFloor: floor } }), post: vi.fn().mockResolvedValue({}),
+  } as unknown as OpenFloorActions;
+  const client = { baseUrl: "http://127.0.0.1:9", token: () => Promise.resolve(null) } as unknown as ApiClient;
+  return { actions, client, session, floor };
+}
 
 function pause(milliseconds = 20): Promise<void> { return new Promise((resolve) => setTimeout(resolve, milliseconds)); }
 

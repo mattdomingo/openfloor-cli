@@ -7,51 +7,81 @@ import open from "open";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { OpenFloorActions } from "./actions.js";
 import type { ApiClient } from "./client.js";
-import type { FloorSnapshot, RepositoryOption, SessionMember, SessionSummary, Usage } from "./contracts.js";
+import { bindWorkspaceSession, unbindWorkspaceSession, updateConfig } from "./config.js";
+import type { FloorSnapshot, RepositoryOption, SessionSummary, Usage } from "./contracts.js";
+import { OpenFloorError } from "./errors.js";
 import { shortId } from "./id.js";
 import { PresenceClient, type ConnectionStatus, type PresenceEvent, type TypingDraft } from "./realtime.js";
 import { sanitizeTerminal } from "./sanitize.js";
-import { updateConfig } from "./config.js";
+import { requireCleanWorkspace, synchronizeWorkspace, type LocalWorkspace } from "./workspace.js";
 
 const exec = promisify(execFile);
-const tabs = ["Overview", "Agents", "Queue", "Team", "Review", "Repository", "Settings"] as const;
-type Tab = typeof tabs[number];
-type Overlay = { kind: "help" } | { kind: "palette"; initial?: string } | { kind: "filter" } | { kind: "create-session" } | { kind: "compose"; target: "queue" | "chat" } | { kind: "output"; text: string } | null;
+type Page = "floor" | "overview" | "review" | "repository" | "settings";
+type FloorPane = "chat" | "agents" | "queue";
+type FloorDetail = { pane: FloorPane; index: number };
+type Overlay = { kind: "help" } | { kind: "palette"; initial?: string } | { kind: "filter" } | { kind: "create-session" } | { kind: "bind-workspace" } | null;
+type LocalSync = "none" | "syncing" | "live" | "paused" | "mismatch";
 
-export type TuiProps = { actions: OpenFloorActions; client: ApiClient; baseUrl: string; initialSessionId?: string };
+export type TuiProps = { actions: OpenFloorActions; client: ApiClient; baseUrl: string; initialSessionId?: string; workspace?: LocalWorkspace };
 
 export function startTui(props: TuiProps): React.ReactElement {
   const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 5_000, retry: false } } });
   return <QueryClientProvider client={queryClient}><App {...props} /></QueryClientProvider>;
 }
 
-function App({ actions, client, baseUrl, initialSessionId }: TuiProps) {
+function App({ actions, client, baseUrl, initialSessionId, workspace }: TuiProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
-  const [width, setWidth] = useState(stdout.columns || 80);
+  const [width, setWidth] = useState(stdout.columns || 100);
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId ?? null);
-  const [selected, setSelected] = useState(0);
-  const [selectedRow, setSelectedRow] = useState(0);
-  const [tab, setTab] = useState<Tab>("Overview");
+  const [selectedSession, setSelectedSession] = useState(0);
+  const [page, setPage] = useState<Page>("floor");
   const [filter, setFilter] = useState("");
   const [overlay, setOverlay] = useState<Overlay>(null);
-  const [notice, setNotice] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(workspace ? `Local workspace: ${workspace.repositoryFullName}` : null);
   const [connection, setConnection] = useState<ConnectionStatus>("closed");
+  const [localSync, setLocalSync] = useState<LocalSync>("none");
+  const [workspaceSyncEnabled, setWorkspaceSyncEnabled] = useState(Boolean(workspace && initialSessionId));
+  const [boundSessionId, setBoundSessionId] = useState<string | null>(workspace ? initialSessionId ?? null : null);
   const [online, setOnline] = useState(new Set<string>());
   const [drafts, setDrafts] = useState<TypingDraft[]>([]);
   const [activities, setActivities] = useState<Record<string, Array<{ sequence: number; kind: string; detail: string }>>>({});
-  const query = useQuery({ queryKey: ["home"], queryFn: () => actions.home() });
-  const sessionQuery = useQuery({ queryKey: ["session", sessionId], queryFn: () => actions.session(sessionId!), enabled: Boolean(sessionId) });
-  const floorQuery = useQuery({ queryKey: ["floor", sessionId], queryFn: () => actions.floor(sessionId!), enabled: Boolean(sessionId), refetchInterval: connection === "live" ? false : 10_000 });
-  const repoTreeQuery = useQuery({ queryKey: ["tree", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/repository/tree`), enabled: Boolean(sessionId && tab === "Repository") });
-  const skillsQuery = useQuery({ queryKey: ["skills", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/skills`), enabled: Boolean(sessionId && tab === "Settings") });
-  const mcpQuery = useQuery({ queryKey: ["mcp", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/mcp-servers`), enabled: Boolean(sessionId && tab === "Settings") });
+  const [floorFocus, setFloorFocus] = useState<"prompt" | FloorPane>("prompt");
+  const [paneRows, setPaneRows] = useState<Record<FloorPane, number>>({ chat: 0, agents: 0, queue: 0 });
+  const [floorDetail, setFloorDetail] = useState<FloorDetail | null>(null);
+  const [syncAttempt, setSyncAttempt] = useState(0);
+  const startupHandled = useRef(false);
+  const workspaceOfferHandled = useRef(new Set<string>());
+  const syncedCandidate = useRef<string | null>(null);
+  const syncQueue = useRef<Promise<unknown>>(Promise.resolve());
   const queryClient = useQueryClient();
 
+  const homeQuery = useQuery({ queryKey: ["home"], queryFn: () => actions.home() });
+  const sessionQuery = useQuery({ queryKey: ["session", sessionId], queryFn: () => actions.session(sessionId!), enabled: Boolean(sessionId) });
+  const floorQuery = useQuery({ queryKey: ["floor", sessionId], queryFn: () => actions.floor(sessionId!), enabled: Boolean(sessionId), refetchInterval: connection === "live" ? false : 10_000 });
+  const treeQuery = useQuery({ queryKey: ["tree", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/repository/tree`), enabled: Boolean(sessionId && page === "repository") });
+  const skillsQuery = useQuery({ queryKey: ["skills", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/skills`), enabled: Boolean(sessionId && page === "settings") });
+  const mcpQuery = useQuery({ queryKey: ["mcp", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/mcp-servers`), enabled: Boolean(sessionId && page === "settings") });
+
   useEffect(() => {
-    const resize = () => setWidth(stdout.columns || 80);
-    stdout.on("resize", resize); return () => { stdout.off("resize", resize); };
+    const resize = () => setWidth(stdout.columns || 100);
+    stdout.on("resize", resize);
+    return () => { stdout.off("resize", resize); };
   }, [stdout]);
+
+  useEffect(() => {
+    if (!workspace || !homeQuery.data || startupHandled.current) return;
+    const boundExists = initialSessionId && homeQuery.data.props.sessions.some((session) => session.id === initialSessionId);
+    startupHandled.current = true;
+    if (boundExists) return;
+    void Promise.resolve().then(async () => {
+      if (initialSessionId) await unbindWorkspaceSession(workspace.root);
+      setWorkspaceSyncEnabled(false);
+      setBoundSessionId(null);
+      setSessionId(null);
+      setOverlay({ kind: "create-session" });
+    });
+  }, [homeQuery.data, initialSessionId, workspace]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -64,370 +94,263 @@ function App({ actions, client, baseUrl, initialSessionId }: TuiProps) {
       else if (event.type === "floor.changed") void queryClient.invalidateQueries({ queryKey: ["floor", sessionId] });
       else if (event.type === "members.changed" || event.type === "session.changed" || event.type === "session.locked") void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       else if (event.type === "session.ended") { setNotice(`Session ended: ${event.reason}`); void queryClient.invalidateQueries({ queryKey: ["home"] }); }
-      else if (event.type === "run.activity") setActivities((current) => { const existing = current[event.runId] ?? []; const all = [...existing, ...event.events].sort((a, b) => a.sequence - b.sequence); return { ...current, [event.runId]: all.filter((item, index) => index === 0 || item.sequence !== all[index - 1]!.sequence).slice(-100) }; });
+      else if (event.type === "run.activity") setActivities((current) => appendActivity(current, event.runId, event.events));
     });
-    presence.on("close", ({ code, reason }) => { if (code === 4001 || code === 4005) { setNotice(reason || "Membership ended"); setSessionId(null); void queryClient.invalidateQueries({ queryKey: ["home"] }); } });
+    presence.on("close", ({ code, reason }) => { if (code === 4001 || code === 4005) { setNotice(reason || "Membership ended"); setSessionId(null); setWorkspaceSyncEnabled(false); setBoundSessionId(null); if (workspace) void unbindWorkspaceSession(workspace.root); void queryClient.invalidateQueries({ queryKey: ["home"] }); } });
     void presence.connect().catch((error) => setNotice(error instanceof Error ? error.message : String(error)));
-    (globalThis as any).__openfloorPresence = presence;
-    return () => { presence.sendDraft("", false); presence.close(); delete (globalThis as any).__openfloorPresence; };
-  }, [actions, client, queryClient, sessionId]);
+    (globalThis as Record<string, unknown>).__openfloorPresence = presence;
+    return () => { presence.sendDraft("", false); presence.close(); delete (globalThis as Record<string, unknown>).__openfloorPresence; };
+  }, [client, queryClient, sessionId, workspace]);
 
   const sessions = useMemo(() => {
-    const values = query.data?.props.sessions ?? [];
-    return values.filter((item) => `${item.title} ${item.objective ?? ""} ${item.id}`.toLowerCase().includes(filter.toLowerCase()))
-      .sort((left, right) => sessionGroup(left) - sessionGroup(right));
-  }, [filter, query.data]);
-
+    const values = homeQuery.data?.props.sessions ?? [];
+    return values.filter((item) => `${item.title} ${item.objective ?? ""} ${item.id}`.toLowerCase().includes(filter.toLowerCase())).sort((left, right) => sessionGroup(left) - sessionGroup(right));
+  }, [filter, homeQuery.data]);
+  const homeSelection = Math.max(0, Math.min(selectedSession, Math.max(0, sessions.length - 1)));
   const floor = floorQuery.data?.props.initialFloor;
   const members = sessionQuery.data?.props.initialMembers ?? [];
-  const rowCount = sessionRowCount(tab, members, floor, repoTreeQuery.data);
-  const homeSelection = Math.max(0, Math.min(selected, Math.max(0, sessions.length - 1)));
-  const rowSelection = Math.max(0, Math.min(selectedRow, Math.max(0, rowCount - 1)));
+  const repositoryName = floor?.repository?.repositoryFullName ?? "";
+  const repositoryStatus = floor?.repository?.status ?? "disconnected";
+  const candidateBranch = floor?.activeCandidate?.branchName ?? "";
+  const candidateSha = floor?.activeCandidate?.remoteCandidateSha ?? "";
+  const effectiveLocalSync: LocalSync = workspace && floor && repositoryName.toLowerCase() !== workspace.repositoryFullName.toLowerCase() ? "mismatch" : localSync;
+
+  useEffect(() => {
+    if (!workspace || !workspaceSyncEnabled || !sessionId || !floor || !candidateBranch || !candidateSha) return;
+    if (repositoryName.toLowerCase() !== workspace.repositoryFullName.toLowerCase()) return;
+    if (repositoryStatus !== "ready") { void Promise.resolve().then(() => { setLocalSync("paused"); setNotice(`Repository is ${repositoryStatus}; local sync paused.`); }); return; }
+    const key = `${sessionId}:${candidateBranch}:${candidateSha}`;
+    if (syncedCandidate.current === key) return;
+    syncedCandidate.current = key;
+    syncQueue.current = syncQueue.current.then(() => { setLocalSync("syncing"); return synchronizeWorkspace(workspace, candidateBranch, candidateSha); }).then((result) => {
+      setLocalSync("live");
+      setNotice(`Local workspace updated on ${result.branch} at ${result.sha.slice(0, 12)}.`);
+    }, (reason) => {
+      setLocalSync("paused");
+      setNotice(reason instanceof Error ? reason.message : String(reason));
+    });
+  }, [candidateBranch, candidateSha, floor, repositoryName, repositoryStatus, sessionId, syncAttempt, workspace, workspaceSyncEnabled]);
+
+  useEffect(() => {
+    if (!workspace || !sessionId || !floor || workspaceSyncEnabled || overlay || workspaceOfferHandled.current.has(sessionId)) return;
+    if (repositoryName.toLowerCase() !== workspace.repositoryFullName.toLowerCase() || !candidateBranch || !candidateSha || repositoryStatus !== "ready") return;
+    workspaceOfferHandled.current.add(sessionId);
+    void Promise.resolve().then(() => setOverlay({ kind: "bind-workspace" }));
+  }, [candidateBranch, candidateSha, floor, overlay, repositoryName, repositoryStatus, sessionId, workspace, workspaceSyncEnabled]);
+
+  useEffect(() => {
+    const error = sessionQuery.error ?? floorQuery.error;
+    if (!(error instanceof OpenFloorError) || error.code !== "not_found" || !workspace || !workspaceSyncEnabled) return;
+    void unbindWorkspaceSession(workspace.root);
+    void Promise.resolve().then(() => {
+      setWorkspaceSyncEnabled(false);
+      setBoundSessionId(null);
+      setSessionId(null);
+      setNotice("Local session binding removed because session is no longer accessible.");
+    });
+  }, [floorQuery.error, sessionQuery.error, workspace, workspaceSyncEnabled]);
+
+  const enterSession = async (id: string, bindWorkspace = false) => {
+    setSessionId(id); setPage("floor"); setOverlay(null); setFloorFocus("prompt"); setFloorDetail(null);
+    await updateConfig({ currentSessionId: id });
+    setWorkspaceSyncEnabled(Boolean(workspace && bindWorkspace));
+    if (workspace && bindWorkspace) { await bindWorkspaceSession(workspace.root, id); setBoundSessionId(id); }
+  };
+  const enableWorkspaceSync = async () => {
+    if (!workspace || !sessionId) return;
+    await requireCleanWorkspace(workspace);
+    await bindWorkspaceSession(workspace.root, sessionId);
+    syncedCandidate.current = null;
+    setWorkspaceSyncEnabled(true);
+    setBoundSessionId(sessionId);
+    setSyncAttempt((value) => value + 1);
+    setNotice(`Local sync enabled for ${workspace.repositoryFullName}.`);
+  };
+  const retryWorkspaceSync = () => {
+    if (!workspace) { setNotice("No local GitHub workspace detected."); return; }
+    if (!workspaceSyncEnabled) {
+      if (repositoryName.toLowerCase() === workspace.repositoryFullName.toLowerCase() && candidateBranch && candidateSha && repositoryStatus === "ready") setOverlay({ kind: "bind-workspace" });
+      else setNotice("Local workspace does not match a ready candidate in this session.");
+      return;
+    }
+    syncedCandidate.current = null;
+    setSyncAttempt((value) => value + 1);
+  };
+  const goSessions = () => { setSessionId(null); setPage("floor"); setOverlay(null); setConnection("closed"); setOnline(new Set()); setDrafts([]); setLocalSync("none"); setFloorFocus("prompt"); setFloorDetail(null); void homeQuery.refetch(); };
+  const refreshSession = () => { void sessionQuery.refetch(); void floorQuery.refetch(); void homeQuery.refetch(); };
+  const runBackground = async (line: string) => {
+    try { await runPalette(line, sessionId, baseUrl); setNotice("Command completed in background."); refreshSession(); }
+    catch (reason) { setNotice(sanitizeTerminal(reason instanceof Error ? reason.message : String(reason)).slice(-240)); }
+  };
 
   useInput((input, key) => {
-    const presence = (globalThis as any).__openfloorPresence as PresenceClient | undefined; presence?.noteInput();
-    if (overlay) {
-      if (key.escape && overlay.kind !== "create-session") {
-        if (overlay.kind === "compose") presence?.sendDraft("", false);
-        setOverlay(null);
-      }
+    const presence = (globalThis as Record<string, unknown>).__openfloorPresence as PresenceClient | undefined;
+    presence?.noteInput();
+    if (overlay) { if (key.escape && overlay.kind !== "create-session") setOverlay(null); return; }
+    if (sessionId) {
+      if (key.ctrl && input === "k") { setOverlay({ kind: "palette" }); return; }
+      if (page !== "floor") { if (key.escape) setPage("floor"); return; }
+      if (floorDetail) { if (key.escape) setFloorDetail(null); return; }
+      if (key.tab) { setFloorFocus((current) => current === "prompt" ? "chat" : current === "chat" ? "agents" : current === "agents" ? "queue" : "prompt"); return; }
+      if (floorFocus === "prompt") return;
+      const panes: FloorPane[] = ["chat", "agents", "queue"];
+      if (key.escape) { setFloorFocus("prompt"); return; }
+      if (key.leftArrow || key.rightArrow) { const index = panes.indexOf(floorFocus); const offset = key.leftArrow ? -1 : 1; setFloorFocus(panes[(index + offset + panes.length) % panes.length]!); return; }
+      const count = floorPaneCount(floorFocus, floor);
+      if (key.upArrow) setPaneRows((current) => ({ ...current, [floorFocus]: Math.max(0, current[floorFocus] - 1) }));
+      else if (key.downArrow) setPaneRows((current) => ({ ...current, [floorFocus]: Math.min(Math.max(0, count - 1), current[floorFocus] + 1) }));
+      else if (key.return && count > 0) setFloorDetail({ pane: floorFocus, index: Math.min(paneRows[floorFocus], count - 1) });
+      else if (input === "r") refreshSession();
+      else if (input === "?") setOverlay({ kind: "help" });
+      else if (input === "q") exit();
       return;
     }
     if (input === "q") { exit(); return; }
     if (input === "?") { setOverlay({ kind: "help" }); return; }
     if (key.ctrl && input === "k") { setOverlay({ kind: "palette" }); return; }
-    if (input === "r") { void query.refetch(); if (sessionId) { void sessionQuery.refetch(); void floorQuery.refetch(); } return; }
-    if (!sessionId) {
-      if (key.upArrow) setSelected((value) => Math.max(0, value - 1));
-      if (key.downArrow) setSelected((value) => Math.min(Math.max(0, sessions.length - 1), value + 1));
-      if (key.return && sessions[homeSelection]) { const id = sessions[homeSelection].id; setSessionId(id); setTab("Overview"); void updateConfig({ currentSessionId: id }); }
-      if (input === "/") setOverlay({ kind: "filter" });
-      if (input === "n") setOverlay({ kind: "create-session" });
-    } else {
-      if (key.escape) { presence?.sendDraft("", false); setSessionId(null); void query.refetch(); return; }
-      if (key.upArrow) { setSelectedRow((value) => Math.max(0, value - 1)); return; }
-      if (key.downArrow) { setSelectedRow((value) => Math.min(Math.max(0, rowCount - 1), value + 1)); return; }
-      if (key.tab || key.leftArrow || key.rightArrow) {
-        presence?.sendDraft("", false);
-        const index = tabs.indexOf(tab);
-        const delta = key.tab ? (key.shift ? -1 : 1) : key.leftArrow ? -1 : 1;
-        setTab(tabs[(index + delta + tabs.length) % tabs.length]!); setSelectedRow(0); return;
-      }
-      if (key.return) { void activateSessionRow(tab, rowSelection, members, floor, repoTreeQuery.data, actions, sessionId, setOverlay, setNotice); return; }
-      if (input === "n" && tab === "Queue") setOverlay({ kind: "compose", target: "queue" });
-      if (input === "c" && tab === "Team") setOverlay({ kind: "compose", target: "chat" });
-      if (input === "e") setOverlay({ kind: "palette", initial: tab === "Overview" ? "sessions show" : `${tab.toLowerCase()} ` });
-    }
+    if (input === "r") { void homeQuery.refetch(); return; }
+    if (key.upArrow) setSelectedSession((value) => Math.max(0, value - 1));
+    if (key.downArrow) setSelectedSession((value) => Math.min(Math.max(0, sessions.length - 1), value + 1));
+    if (key.return && sessions[homeSelection]) void enterSession(sessions[homeSelection].id, sessions[homeSelection].id === boundSessionId);
+    if (input === "/") setOverlay({ kind: "filter" });
+    if (input === "n") setOverlay({ kind: "create-session" });
   });
 
-  if (width < 60) return <Box flexDirection="column"><Text bold color="red">Terminal too narrow ({width} columns)</Text><Text>Resize to at least 60 columns or use subcommands.</Text></Box>;
-  if (query.isLoading) return <Text color="cyan">Loading openfloor…</Text>;
-  if (query.error) return <ErrorView error={query.error} />;
+  if (width < 60) return <Box flexDirection="column"><Text bold color="red">Terminal too narrow ({width} columns)</Text><Text>Resize to at least 60 columns.</Text></Box>;
+  if (homeQuery.isLoading) return <Text color="cyan">Loading openfloor…</Text>;
+  if (homeQuery.error) return <ErrorView error={homeQuery.error} />;
 
   return <Box flexDirection="column" width="100%">
-    <Header {...(sessionQuery.data?.props.session ? { session: sessionQuery.data.props.session } : {})} connection={connection} />
-    {notice && <Text color="yellow">{notice}</Text>}
-    {!sessionId ? <Home sessions={sessions} selected={homeSelection} {...(query.data?.props.usage ? { usage: query.data.props.usage } : {})} /> :
-      <SessionView width={width} tab={tab} selected={rowSelection} members={members} {...(floor ? { floor } : {})} online={online} drafts={drafts} activities={activities} tree={repoTreeQuery.data} skills={skillsQuery.data} mcp={mcpQuery.data} />}
-    <Footer session={Boolean(sessionId)} />
-    {overlay && <OverlayView overlay={overlay} sessionId={sessionId} baseUrl={baseUrl} actions={actions} presence={(globalThis as any).__openfloorPresence} close={() => { setOverlay(null); void query.refetch(); void floorQuery.refetch(); }} showOutput={(text) => setOverlay({ kind: "output", text })} setFilter={setFilter} onSessionCreated={(createdId, ready, message) => { setOverlay(null); setNotice(message); void query.refetch(); if (ready) { setSessionId(createdId); setTab("Overview"); setSelectedRow(0); void updateConfig({ currentSessionId: createdId }); } }} />}
+    <Header {...(sessionQuery.data?.props.session ? { session: sessionQuery.data.props.session } : {})} connection={connection} {...(workspace ? { workspace } : {})} localSync={effectiveLocalSync} />
+    {notice && <Text color={effectiveLocalSync === "paused" || effectiveLocalSync === "mismatch" ? "yellow" : "cyan"}>{notice}</Text>}
+    {!sessionId ? <Home sessions={sessions} selected={homeSelection} {...(homeQuery.data?.props.usage ? { usage: homeQuery.data.props.usage } : {})} {...(workspace ? { workspace } : {})} /> : floor ? <>
+      {page === "floor" ? floorDetail ? <FloorItemDetail detail={floorDetail} floor={floor} activities={activities} /> : <FloorDashboard width={width} floor={floor} online={online} drafts={drafts} activities={activities} focus={floorFocus} rows={paneRows} /> : <PageView page={page} floor={floor} members={members} online={online} tree={treeQuery.data} skills={skillsQuery.data} mcp={mcpQuery.data} {...(workspace ? { workspace } : {})} localSync={effectiveLocalSync} />}
+      <CommandBar page={page} sessionId={sessionId} actions={actions} {...((globalThis as Record<string, unknown>).__openfloorPresence ? { presence: (globalThis as Record<string, unknown>).__openfloorPresence as PresenceClient } : {})} focused={floorFocus === "prompt" && !floorDetail} navigate={(next) => { setPage(next); setFloorDetail(null); setFloorFocus("prompt"); }} goSessions={goSessions} refresh={refreshSession} retryWorkspaceSync={retryWorkspaceSync} runBackground={runBackground} setNotice={setNotice} />
+    </> : <Text color="cyan">Loading session floor…</Text>}
+    {!sessionId && <Footer />}
+    {overlay && <OverlayView overlay={overlay} baseUrl={baseUrl} actions={actions} close={() => { setOverlay(null); void homeQuery.refetch(); }} setFilter={setFilter} runBackground={runBackground} {...(workspace ? { workspace } : {})} repositoryName={repositoryName} candidateBranch={candidateBranch} candidateSha={candidateSha} enableWorkspaceSync={enableWorkspaceSync} onSessionCreated={(id, ready, message) => { setNotice(message); void homeQuery.refetch(); if (ready) void enterSession(id, true); else setOverlay(null); }} />}
   </Box>;
 }
 
-function Header({ session, connection }: { session?: SessionSummary; connection: ConnectionStatus }) {
-  return <Box borderStyle="round" borderColor="cyan" paddingX={1} justifyContent="space-between"><Text bold color="cyan">openfloor</Text><Text>{session ? `${session.title}  ` : ""}<Text color={connection === "live" ? "green" : connection === "quota-exhausted" ? "red" : "yellow"}>{connection}</Text></Text></Box>;
+function Header({ session, connection, workspace, localSync }: { session?: SessionSummary; connection: ConnectionStatus; workspace?: LocalWorkspace; localSync: LocalSync }) {
+  const syncText = !workspace ? "" : localSync === "live" ? " · local live" : localSync === "syncing" ? " · syncing local" : localSync === "paused" ? " · local paused" : localSync === "mismatch" ? " · different repository" : "";
+  return <Box borderStyle="round" borderColor="cyan" paddingX={1} justifyContent="space-between"><Text bold color="cyan">openfloor</Text><Text>{session ? `${session.title} · ` : ""}<Text color={connection === "live" ? "green" : connection === "quota-exhausted" ? "red" : "yellow"}>{connection}</Text><Text color={localSync === "live" ? "green" : "yellow"}>{syncText}</Text></Text></Box>;
 }
 
-function Home({ sessions, selected, usage }: { sessions: SessionSummary[]; selected: number; usage?: Usage }) {
-  const groups = [
-    ["Active", sessions.filter((session) => session.endedAt == null && session.archivedAt == null)],
-    ["Archived", sessions.filter((session) => session.endedAt == null && session.archivedAt != null)],
-    ["Ended", sessions.filter((session) => session.endedAt != null)],
-  ] as const;
-  return <Box flexDirection="column" paddingX={1}>
-    <Text bold>Sessions</Text>
-    {sessions.length === 0 ? <Text dimColor>No sessions.</Text> : groups.map(([label, values]) => values.length ? <Box key={label} flexDirection="column"><Text bold>{label}</Text>{values.map((session) => { const index = sessions.indexOf(session); return <Text key={session.id} {...(index === selected ? { color: "cyan" as const } : {})} inverse={index === selected}>{index === selected ? "›" : " "} {session.title.padEnd(28).slice(0, 28)} {shortId(session.id)} {session.role}</Text>; })}</Box> : null)}
-    {usage && <UsageSummary usage={usage} />}
-  </Box>;
+function Home({ sessions, selected, usage, workspace }: { sessions: SessionSummary[]; selected: number; usage?: Usage; workspace?: LocalWorkspace }) {
+  const groups = [["Active", sessions.filter((session) => session.endedAt == null && session.archivedAt == null)], ["Archived", sessions.filter((session) => session.endedAt == null && session.archivedAt != null)], ["Ended", sessions.filter((session) => session.endedAt != null)]] as const;
+  return <Box flexDirection="column" paddingX={1}><Text bold>Sessions</Text>{workspace && <Text color="cyan">Git workspace detected: {workspace.repositoryFullName}</Text>}{sessions.length === 0 ? <Text dimColor>No sessions. Press n to create one.</Text> : groups.map(([label, values]) => values.length ? <Box key={label} flexDirection="column"><Text bold>{label}</Text>{values.map((session) => { const index = sessions.indexOf(session); return <Text key={session.id} inverse={index === selected} {...(index === selected ? { color: "cyan" as const } : {})}>{index === selected ? "›" : " "} {session.title.padEnd(30).slice(0, 30)} {shortId(session.id)} {session.role}</Text>; })}</Box> : null)}{usage && <UsageSummary usage={usage} />}</Box>;
 }
 
 function UsageSummary({ usage }: { usage: Usage }) {
-  const plan = `${usage.effectivePlan[0]!.toUpperCase()}${usage.effectivePlan.slice(1)} plan`;
+  const plan = `${capitalize(usage.effectivePlan)} plan`;
   const allowance = `${usage.limitHours === null ? "Unlimited session time" : `${usage.limitHours} session hours per month`} · ${usage.limitSeats === null ? "Unlimited seats" : `${usage.limitSeats} seats per session`}`;
-  if (usage.limitHours === null) {
-    return <Box flexDirection="column" marginTop={1}><Text bold color="cyan">{plan}</Text><Text>{allowance}</Text><Text dimColor>{formatDuration(usage.seconds)} used this month (UTC)</Text></Box>;
-  }
-  const limitSeconds = usage.limitHours * 3600;
-  const used = limitSeconds > 0 ? Math.min(1, usage.seconds / limitSeconds) : 1;
-  const cells = 20;
-  const filled = Math.round(used * cells);
-  const remaining = Math.max(0, limitSeconds - usage.seconds);
-  return <Box flexDirection="column" marginTop={1}>
-    <Text bold color="cyan">{plan}</Text>
-    <Text>{allowance}</Text>
-    <Text><Text color="cyan">{`${"█".repeat(filled)}${"░".repeat(cells - filled)}`}</Text> {Math.round(used * 100)}%</Text>
-    <Text>{formatDuration(usage.seconds)} of {usage.limitHours}h used · {formatDuration(remaining)} remaining (UTC month)</Text>
+  if (usage.limitHours === null) return <Box flexDirection="column" marginTop={1}><Text bold color="cyan">{plan}</Text><Text>{allowance}</Text><Text dimColor>{formatDuration(usage.seconds)} used this month (UTC)</Text></Box>;
+  const limitSeconds = usage.limitHours * 3_600; const used = limitSeconds > 0 ? Math.min(1, usage.seconds / limitSeconds) : 1; const filled = Math.round(used * 20);
+  return <Box flexDirection="column" marginTop={1}><Text bold color="cyan">{plan}</Text><Text>{allowance}</Text><Text color="cyan">{"█".repeat(filled)}{"░".repeat(20 - filled)} {Math.round(used * 100)}%</Text><Text>{formatDuration(usage.seconds)} used · {formatDuration(Math.max(0, limitSeconds - usage.seconds))} remaining</Text></Box>;
+}
+
+function FloorDashboard({ width, floor, online, drafts, activities, focus, rows }: { width: number; floor: FloorSnapshot; online: Set<string>; drafts: TypingDraft[]; activities: Record<string, Array<{ sequence: number; kind: string; detail: string }>>; focus: "prompt" | FloorPane; rows: Record<FloorPane, number> }) {
+  const horizontal = width >= 100;
+  return <Box flexDirection={horizontal ? "row" : "column"} minHeight={22}>
+    <Panel title="Team chat" width={horizontal ? "28%" : "100%"} active={focus === "chat"}>{floor.messages.length ? floor.messages.slice(-14).map((message, index) => <Text key={recordText(message, "id", String(index))} inverse={focus === "chat" && index === rows.chat}><Text bold color="cyan">{recordText(message, "authorName", "Member")}</Text>{recordText(message, "recipientUserId") ? " · DM" : ""}: {recordText(message, "text")}</Text>) : <Text dimColor>No messages. Use /chat message.</Text>}{drafts.slice(-3).map((draft) => <Text key={draft.userId} color="yellow">{draft.displayName} typing: {draft.text.slice(0, 60)}</Text>)}{online.size > 0 && <Text dimColor>{online.size} online</Text>}</Panel>
+    <Panel title="Agent floor" width={horizontal ? "44%" : "100%"} active={focus === "agents"}>{floor.agents.length ? floor.agents.map((agent, index) => { const run = floor.runs.filter((item) => item.agentId === agent.id).sort((left, right) => right.updatedAt - left.updatedAt)[0]; const live = run ? activities[run.id]?.at(-1) : undefined; const status = agent.pausedAt ? "paused" : run?.status ?? "idle"; return <Box key={agent.id} flexDirection="column" marginBottom={1}><Text inverse={focus === "agents" && index === rows.agents} bold color={statusColor(status)}>● {agent.name} <Text dimColor>{agent.provider}/{agent.model ?? "default"}</Text></Text><Text>{agent.role}: {agent.task}</Text><Text color={statusColor(status)}>{status}{live ? ` · ${live.detail}` : ""}</Text></Box>; }) : <Text dimColor>No agents running. Create one with /run agents create …</Text>}</Panel>
+    <Panel title="Prompt queue" width={horizontal ? "28%" : "100%"} active={focus === "queue"}>{floor.queue.length ? floor.queue.slice(0, 14).map((item, index) => <Box key={item.id} flexDirection="column" marginBottom={1}><Text inverse={focus === "queue" && index === rows.queue} color={statusColor(item.status)}>{String(item.position + 1).padStart(2)} · {item.status} · {item.agentName ?? "unassigned"}</Text><Text>{item.prompts.map((prompt) => prompt.text).join(" / ").slice(0, 100)}</Text></Box>) : <Text dimColor>Queue empty. Type a prompt below.</Text>}</Panel>
   </Box>;
 }
 
-function SessionView({ width, tab, selected, members, floor, online, drafts, activities, tree, skills, mcp }: { width: number; tab: Tab; selected: number; members: any[]; floor?: FloorSnapshot; online: Set<string>; drafts: TypingDraft[]; activities: Record<string, Array<{ sequence: number; kind: string; detail: string }>>; tree?: any; skills?: any; mcp?: any }) {
-  if (!floor) return <Text color="cyan">Loading floor…</Text>;
-  const narrow = width < 120;
-  return <Box flexDirection={narrow ? "column" : "row"} minHeight={16}>
-    <Box flexDirection={narrow ? "row" : "column"} width={narrow ? "100%" : 16} borderStyle="single" borderColor="gray" paddingX={1}>{tabs.map((name) => <Text key={name} {...(tab === name ? { color: "cyan" as const } : {})} bold={tab === name}>{narrow ? `${name} ` : name}</Text>)}</Box>
-    <Box flexDirection="column" flexGrow={1} borderStyle="single" borderColor="gray" paddingX={1}>
-      {tab === "Overview" && <><Text bold>Members</Text>{members.map((member, index) => <Selectable key={member.id} active={selected === index} color={online.has(member.id) ? "green" : "white"}>● {member.displayName} · {member.role}{online.has(member.id) ? " · online" : ""}</Selectable>)}<Text bold>Assignments</Text>{floor.assignments.map((item: any, index: number) => <Selectable key={item.userId} active={selected === members.length + index}>{item.userName}: {item.task ?? "Unassigned"}</Selectable>)}</>}
-      {tab === "Agents" && <>{floor.agents.length ? floor.agents.map((agent, index) => { const run = floor.runs.find((item) => item.agentId === agent.id); const live = run ? activities[run.id]?.at(-1) : undefined; return <Box key={agent.id} flexDirection="column" marginBottom={1}><Selectable active={selected === index} color={agent.pausedAt ? "yellow" : "cyan"}>{agent.name} · {agent.provider}/{agent.model ?? "default"} · {agent.pausedAt ? "paused" : run?.status ?? "idle"}</Selectable><Text>{agent.role}: {agent.task}</Text>{live && <Text dimColor>[{live.kind}] {live.detail}</Text>}</Box>; }) : <Text dimColor>No agents.</Text>}</>}
-      {tab === "Queue" && <>{floor.queue.length ? floor.queue.map((item, index) => <Box key={item.id} flexDirection="column"><Selectable active={selected === index} color={item.status === "failed" ? "red" : item.status === "completed" ? "green" : "white"}>{String(item.position + 1).padStart(2)} {item.status.padEnd(10)} {item.agentName ?? "unassigned"} · {shortId(item.id)}</Selectable><Text dimColor>{item.prompts.map((prompt) => prompt.text).join(" / ").slice(0, 140)}</Text></Box>) : <Text dimColor>Queue empty. Press n to add.</Text>}</>}
-      {tab === "Team" && <>{floor.messages.slice(-20).map((message: any, index: number) => <Selectable key={message.id} active={selected === index}><Text bold>{message.authorName}</Text>{message.recipientUserId ? " · DM" : ""}: {message.text}</Selectable>)}{drafts.map((draft) => <Text key={draft.userId} color="yellow">{draft.displayName} typing: {draft.text}</Text>)}<Text dimColor>Press c to send team chat.</Text></>}
-      {tab === "Review" && <ReviewView review={floor.review} runs={floor.runs} selected={selected} />}
-      {tab === "Repository" && <><Text bold>{recordText(floor.repository, "repositoryFullName", "No repository")}</Text><Text>Candidate: {recordText(floor.activeCandidate, "branchName", "none")}</Text><Text>Preflight: {recordText(floor.latestPreflight, "status", "none")}</Text><Text bold>Tree</Text>{recordArray(tree, "entries", "tree").slice(0, 20).map((entry, index) => <Selectable active={selected === index} key={recordText(entry, "path", "unknown")}>{recordText(entry, "type") === "tree" ? "▸" : "·"} {recordText(entry, "path")}</Selectable>)}</>}
-      {tab === "Settings" && <><Selectable active={selected === 0}>Routing · auto-dispatch {String(floor.autoDispatch)} · auto-agents {String(floor.autoProvisionAgents)}</Selectable><Selectable active={selected === 1}>Invite and members</Selectable><Selectable active={selected === 2}>Skills {recordArray(skills, "skills").length} · MCP servers {recordArray(mcp, "servers").length}</Selectable><Selectable active={selected === 3} color="yellow">Session lifecycle</Selectable></>}
-    </Box>
+function Panel({ title, width, active, children }: { title: string; width: number | `${number}%`; active: boolean; children: React.ReactNode }) { return <Box flexDirection="column" width={width} borderStyle={active ? "double" : "round"} borderColor={active ? "cyan" : "gray"} paddingX={1}><Text bold color="cyan">{active ? "› " : ""}{title}</Text>{children}</Box>; }
+
+function FloorItemDetail({ detail, floor, activities }: { detail: FloorDetail; floor: FloorSnapshot; activities: Record<string, Array<{ sequence: number; kind: string; detail: string }>> }) {
+  if (detail.pane === "chat") { const message = floor.messages.slice(-14)[detail.index]; return <Detail title="Team message"><Text bold>{recordText(message, "authorName", "Member")}{recordText(message, "recipientUserId") ? " · DM" : ""}</Text><Text>{recordText(message, "text")}</Text><Text dimColor>Esc returns to floor</Text></Detail>; }
+  if (detail.pane === "agents") { const agent = floor.agents[detail.index]; if (!agent) return <Detail title="Agent">Agent no longer available.</Detail>; const run = floor.runs.filter((item) => item.agentId === agent.id).sort((left, right) => right.updatedAt - left.updatedAt)[0]; const live = run ? activities[run.id]?.at(-1) : undefined; return <Detail title={agent.name}><Text>{agent.role}: {agent.task}</Text><Text>Provider: {agent.provider}/{agent.model ?? "default"}</Text><Text>Owner: {agent.ownerName}</Text><Text>Status: {agent.pausedAt ? "paused" : run?.status ?? "idle"}</Text>{live && <Text>Latest: {live.detail}</Text>}<Text dimColor>ID {agent.id} · Esc returns to floor</Text></Detail>; }
+  const item = floor.queue.slice(0, 14)[detail.index]; if (!item) return <Detail title="Prompt">Prompt no longer available.</Detail>; return <Detail title={`Queue ${item.position + 1}`}><Text>Status: {item.status} · {item.agentName ?? "unassigned"}</Text>{item.prompts.map((prompt) => <Text key={prompt.id}><Text bold>{prompt.authorName}:</Text> {prompt.text}</Text>)}<Text dimColor>ID {item.id} · Esc returns to floor</Text></Detail>;
+}
+
+function Detail({ title, children }: { title: string; children: React.ReactNode }) { return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} minHeight={22}><Text bold color="cyan">{title}</Text>{children}</Box>; }
+
+function PageView({ page, floor, members, online, tree, skills, mcp, workspace, localSync }: { page: Exclude<Page, "floor">; floor: FloorSnapshot; members: any[]; online: Set<string>; tree: unknown; skills: unknown; mcp: unknown; workspace?: LocalWorkspace; localSync: LocalSync }) {
+  return <Box flexDirection="column" borderStyle="round" borderColor="gray" paddingX={1} minHeight={22}><Text bold color="cyan">/{page}</Text>
+    {page === "overview" && <><Text bold>Members</Text>{members.map((member) => <Text key={member.id} color={online.has(member.id) ? "green" : "white"}>● {member.displayName} · {member.role}{online.has(member.id) ? " · online" : ""}</Text>)}<Text bold>Assignments</Text>{floor.assignments.length ? floor.assignments.map((assignment: any) => <Text key={assignment.userId}>{assignment.userName}: {assignment.task ?? "Unassigned"}</Text>) : <Text dimColor>No assignments.</Text>}<Text bold>Repository</Text><Text>{recordText(floor.repository, "repositoryFullName", "No repository")} · {recordText(floor.activeCandidate, "branchName", "No candidate")}</Text>{workspace && <Text>Local: {workspace.root} · {localSync}</Text>}</>}
+    {page === "review" && <ReviewView floor={floor} />}
+    {page === "repository" && <><Text>{recordText(floor.repository, "repositoryFullName", "No repository")}</Text><Text>Candidate: {recordText(floor.activeCandidate, "branchName", "none")}</Text><Text>Preflight: {recordText(floor.latestPreflight, "status", "none")}</Text><Text bold>Files</Text>{recordArray(tree, "entries", "tree").slice(0, 18).map((entry) => <Text key={recordText(entry, "path", "unknown")}>{recordText(entry, "type") === "tree" ? "▸" : "·"} {recordText(entry, "path")}</Text>)}</>}
+    {page === "settings" && <><Text>Auto-dispatch: {String(floor.autoDispatch)}</Text><Text>Auto-agents: {String(floor.autoProvisionAgents)}</Text><Text>Auto-conflicts: {String(floor.autoResolveConflicts)}</Text><Text>Skills: {recordArray(skills, "skills").length} · MCP servers: {recordArray(mcp, "servers").length}</Text><Text dimColor>Use /run routing, invite, members, skills, mcp, repository, or session lifecycle commands.</Text></>}
   </Box>;
 }
 
-function ReviewView({ review, runs, selected }: { review: any; runs: any[]; selected: number }) {
-  if (!review) return <Text dimColor>No review available.</Text>;
-  return <><Text bold>Candidate review</Text><Text>PR: {review.pullRequest?.url ?? "not created"} · checks {String(review.checksPassing ?? review.githubChecksPassing ?? "pending")}</Text><Text>Files: {review.files?.length ?? runs.flatMap((run) => run.files).length} · Conflicts: {review.conflicts?.length ?? 0}</Text>{runs.slice(-8).map((run, index) => <Selectable active={selected === index} key={run.id}>{shortId(run.id)} {run.agentName} · {run.status} · {run.summary ?? ""}</Selectable>)}</>;
+function ReviewView({ floor }: { floor: FloorSnapshot }) { if (!floor.review) return <Text dimColor>No review available.</Text>; const review = floor.review as Record<string, any>; return <><Text>PR: {review.pullRequest?.url ?? "not created"}</Text><Text>Checks: {String(review.checksPassing ?? review.githubChecksPassing ?? "pending")}</Text><Text>Files: {review.files?.length ?? floor.runs.flatMap((run) => run.files).length} · Conflicts: {review.conflicts?.length ?? 0}</Text>{floor.runs.slice(-12).map((run) => <Text key={run.id}>{shortId(run.id)} · {run.agentName} · {run.status} · {run.summary ?? ""}</Text>)}</>; }
+
+function CommandBar({ page, sessionId, actions, presence, focused, navigate, goSessions, refresh, retryWorkspaceSync, runBackground, setNotice }: { page: Page; sessionId: string; actions: OpenFloorActions; presence?: PresenceClient; focused: boolean; navigate: (page: Page) => void; goSessions: () => void; refresh: () => void; retryWorkspaceSync: () => void; runBackground: (line: string) => Promise<void>; setNotice: (message: string) => void }) {
+  const { exit } = useApp(); const [value, setValue] = useState(""); const [inputKey, setInputKey] = useState(0); const [commands, setCommands] = useState(false);
+  const reset = () => { setValue(""); setInputKey((key) => key + 1); presence?.sendDraft("", false); };
+  const submit = async (raw: string) => {
+    const text = raw.trim(); if (!text) return;
+    if (text.startsWith("/")) {
+      const [command = "", ...rest] = text.slice(1).split(/\s+/); const argument = rest.join(" ").trim();
+      if (["floor", "overview", "review", "repository", "settings"].includes(command)) navigate(command as Page);
+      else if (command === "sessions") goSessions();
+      else if (command === "refresh") { refresh(); setNotice("Session refreshed."); }
+      else if (command === "sync") retryWorkspaceSync();
+      else if (command === "commands" || command === "help") setCommands(true);
+      else if (command === "quit") exit();
+      else if (command === "chat") { if (!argument) { setNotice("Usage: /chat <message>"); return; } await actions.post(`/api/sessions/${sessionId}/messages`, { text: argument, recipientUserId: null }); setNotice("Team message sent."); refresh(); }
+      else if (command === "queue") { if (!argument) { setNotice("Usage: /queue <prompt>"); return; } await actions.post(`/api/sessions/${sessionId}/queue`, { prompt: argument, agentId: null }); setNotice("Prompt added to queue."); refresh(); }
+      else if (command === "run") { if (!argument) { setNotice("Usage: /run <CLI subcommand>"); return; } await runBackground(argument); }
+      else setNotice(`Unknown command: /${command}. Use /commands.`);
+      reset(); return;
+    }
+    await actions.post(`/api/sessions/${sessionId}/queue`, { prompt: text, agentId: null }); setNotice("Prompt added to queue."); refresh(); reset();
+  };
+  return <Box flexDirection="column">{(commands || value.startsWith("/")) && <Text dimColor>/floor /overview /review /repository /settings /sessions /chat &lt;message&gt; /queue &lt;prompt&gt; /run &lt;command&gt; /refresh /sync /quit</Text>}<Box borderStyle={focused ? "double" : "round"} borderColor="cyan" paddingX={1}><Text color="cyan">{focused ? `${page} › ` : `${page} · Tab returns › `}</Text><TextInput key={inputKey} isDisabled={!focused} placeholder="Prompt agents or type /commands" onChange={(next) => { setValue(next); setCommands(false); if (next.startsWith("/")) presence?.sendDraft("", false); else presence?.sendDraft(next); }} onSubmit={(next) => { void submit(next).catch((reason) => setNotice(reason instanceof Error ? reason.message : String(reason))); }} /></Box></Box>;
 }
 
-function Selectable({ active, color = "white", children }: { active: boolean; color?: string; children: React.ReactNode }) { return <Text inverse={active} bold={active} color={color}>{active ? "› " : "  "}{children}</Text>; }
-
-function Footer({ session }: { session: boolean }) { return <Box paddingX={1}><Text dimColor>{session ? "↑↓ select · ←→/Tab views · Enter open · Esc home · " : "↑↓ select · Enter open · n create · "}Ctrl+K commands · ? help · q quit</Text></Box>; }
-
-function OverlayView({ overlay, sessionId, baseUrl, actions, presence, close, showOutput, setFilter, onSessionCreated }: { overlay: NonNullable<Overlay>; sessionId: string | null; baseUrl: string; actions: OpenFloorActions; presence?: PresenceClient; close: () => void; showOutput: (text: string) => void; setFilter: (value: string) => void; onSessionCreated: (id: string, ready: boolean, message: string) => void }) {
-  const [error, setError] = useState<string | null>(null);
-  if (overlay.kind === "help") return <Modal title="Help"><Text>Arrow keys navigate. Tab changes session view. Ctrl+K runs every subcommand. n adds queue work. c sends team chat. Esc closes. q quits.</Text></Modal>;
-  if (overlay.kind === "output") return <Modal title="Command output"><Text>{overlay.text.slice(-8_000)}</Text><Text dimColor>Esc closes.</Text></Modal>;
+function OverlayView({ overlay, baseUrl, actions, close, setFilter, runBackground, workspace, repositoryName, candidateBranch, candidateSha, enableWorkspaceSync, onSessionCreated }: { overlay: NonNullable<Overlay>; baseUrl: string; actions: OpenFloorActions; close: () => void; setFilter: (value: string) => void; runBackground: (line: string) => Promise<void>; workspace?: LocalWorkspace; repositoryName: string; candidateBranch: string; candidateSha: string; enableWorkspaceSync: () => Promise<void>; onSessionCreated: (id: string, ready: boolean, message: string) => void }) {
+  if (overlay.kind === "help") return <Modal title="Help"><Text>Home: arrows select, Enter opens, n creates, / filters, q quits.</Text><Text>Floor: type prompts directly. Tab enters panes, arrows navigate, Enter opens, Esc returns to prompt.</Text><Text>Use /commands for pages and actions. Ctrl+C exits without cancelling remote runs.</Text></Modal>;
   if (overlay.kind === "filter") return <Modal title="Filter sessions"><TextInput placeholder="Title, objective, or ID" onSubmit={(value) => { setFilter(value); close(); }} /></Modal>;
-  if (overlay.kind === "create-session") return <CreateSessionWizard actions={actions} baseUrl={baseUrl} close={close} onCreated={onSessionCreated} />;
-  if (overlay.kind === "compose") return <Modal title={overlay.target === "queue" ? "Add queue prompt" : "Send team message"}><TextInput placeholder="Type and press Enter" onChange={(value) => { if (overlay.target === "queue") presence?.sendDraft(value); }} onSubmit={(value) => { void (async () => { try { if (!sessionId) return; if (overlay.target === "queue") { await actions.post(`/api/sessions/${sessionId}/queue`, { prompt: value, agentId: null }); presence?.sendDraft("", false); } else await actions.post(`/api/sessions/${sessionId}/messages`, { text: value, recipientUserId: null }); close(); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); } })(); }} />{error && <Text color="red">{error}</Text>}</Modal>;
-  return <Modal title="Command palette"><TextInput {...(overlay.initial === undefined ? {} : { defaultValue: overlay.initial })} placeholder="queue add &quot;Fix tests&quot;" onSubmit={(value) => { void runPalette(value, sessionId, baseUrl).then(showOutput, (reason) => setError(reason instanceof Error ? reason.message : String(reason))); }} />{error && <Text color="red">{error}</Text>}<Text dimColor>Any subcommand; omit leading openfloor.</Text></Modal>;
+  if (overlay.kind === "create-session") return <CreateSessionWizard actions={actions} baseUrl={baseUrl} close={close} {...(workspace ? { workspace } : {})} onCreated={onSessionCreated} />;
+  if (overlay.kind === "bind-workspace" && workspace) return <BindWorkspaceConfirm workspace={workspace} repositoryName={repositoryName} branch={candidateBranch} sha={candidateSha} close={close} confirm={enableWorkspaceSync} />;
+  if (overlay.kind === "bind-workspace") return <Modal title="Local sync unavailable"><Text>No local GitHub workspace detected.</Text></Modal>;
+  return <Modal title="Command palette"><TextInput {...(overlay.initial === undefined ? {} : { defaultValue: overlay.initial })} placeholder="queue add &quot;Fix tests&quot;" onSubmit={(value) => { close(); void runBackground(value); }} /><Text dimColor>Runs in background. Output never covers floor.</Text></Modal>;
+}
+
+function BindWorkspaceConfirm({ workspace, repositoryName, branch, sha, close, confirm }: { workspace: LocalWorkspace; repositoryName: string; branch: string; sha: string; close: () => void; confirm: () => Promise<void> }) {
+  const [working, setWorking] = useState(false); const [error, setError] = useState<string | null>(null);
+  useInput((input, key) => { if (working) return; if (key.escape || input.toLowerCase() === "n") close(); else if (key.return || input.toLowerCase() === "y") { setWorking(true); setError(null); void confirm().then(close, (reason) => { setWorking(false); setError(reason instanceof Error ? reason.message : String(reason)); }); } });
+  return <Modal title="Enable local live sync?"><Text>Repository: {repositoryName}</Text><Text>Directory: {workspace.root}</Text><Text>Candidate: {branch}</Text><Text>Expected SHA: {sha}</Text><Text color="yellow">Clean checkout will switch to this candidate branch and receive fast-forward updates. Local edits are never uploaded.</Text>{error && <Text color="red">{error}</Text>}<Text color="cyan">{working ? "Checking workspace…" : "Enter/y confirms · Esc/n keeps local sync off"}</Text></Modal>;
 }
 
 type CreateStage = "loading" | "empty" | "title" | "objective" | "candidate" | "repository" | "repository-search" | "confirm" | "submitting" | "error";
-
-function CreateSessionWizard({ actions, baseUrl, close, onCreated }: { actions: OpenFloorActions; baseUrl: string; close: () => void; onCreated: (id: string, ready: boolean, message: string) => void }) {
-  const [stage, setStage] = useState<CreateStage>("loading");
-  const [repositories, setRepositories] = useState<RepositoryOption[]>([]);
-  const [selectedRepository, setSelectedRepository] = useState(0);
-  const [search, setSearch] = useState("");
-  const [title, setTitle] = useState("");
-  const [objective, setObjective] = useState("");
-  const [candidateName, setCandidateName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [loadAttempt, setLoadAttempt] = useState(0);
-  const submitted = useRef(false);
-
-  useEffect(() => {
-    let active = true;
-    void actions.repositories().then(({ repositories: values }) => {
-      if (!active) return;
-      setRepositories(values);
-      setSelectedRepository(0);
-      setStage(values.length ? "title" : "empty");
-    }, (reason) => {
-      if (!active) return;
-      setError(reason instanceof Error ? reason.message : String(reason));
-      setStage("error");
-    });
-    return () => { active = false; };
-  }, [actions, loadAttempt]);
-
-  const filteredRepositories = repositories.filter((repository) => repository.fullName.toLowerCase().includes(search.trim().toLowerCase()));
-  const selected = repositories[selectedRepository];
-
-  const submit = async () => {
-    if (!selected || submitted.current) return;
-    submitted.current = true;
-    setError(null);
-    setStage("submitting");
-    try {
-      const created = await actions.createSession({
-        title: title.trim(),
-        objective: objective.trim() || null,
-        candidateName: candidateName.trim() || title.trim(),
-        repositoryId: selected.id,
-        accountInstallationId: selected.accountInstallationId,
-      });
-      const ready = created.setupStatus === "ready";
-      onCreated(created.session.id, ready, ready ? "Session created." : created.setupError ?? "Session created, but repository setup needs attention.");
-    } catch (reason) {
-      submitted.current = false;
-      setError(reason instanceof Error ? reason.message : String(reason));
-      setStage("error");
-    }
-  };
-
-  useInput((input, key) => {
-    if (stage === "repository") {
-      if (key.upArrow) setSelectedRepository((value) => Math.max(0, value - 1));
-      else if (key.downArrow) setSelectedRepository((value) => Math.min(repositories.length - 1, value + 1));
-      else if (input === "/") { setSearch(""); setStage("repository-search"); }
-      else if (key.return && selected) setStage("confirm");
-      else if (key.escape) setStage("candidate");
-      return;
-    }
-    if (stage === "confirm") {
-      if (key.return) void submit();
-      else if (key.escape) setStage("repository");
-      return;
-    }
-    if (stage === "empty" && key.return) { void open(`${baseUrl}/home/settings?section=connections`); return; }
-    if (stage === "error" && input.toLowerCase() === "r") {
-      setError(null);
-      if (repositories.length) setStage("confirm");
-      else { setStage("loading"); setLoadAttempt((value) => value + 1); }
-      return;
-    }
-    if (!key.escape) return;
-    if (stage === "objective") setStage("title");
-    else if (stage === "candidate") setStage("objective");
-    else if (stage === "repository-search") setStage("repository");
-    else if (!["loading", "submitting"].includes(stage)) close();
-  });
-
-  return <Modal title="New session">
+function CreateSessionWizard({ actions, baseUrl, close, workspace, onCreated }: { actions: OpenFloorActions; baseUrl: string; close: () => void; workspace?: LocalWorkspace; onCreated: (id: string, ready: boolean, message: string) => void }) {
+  const [stage, setStage] = useState<CreateStage>("loading"); const [repositories, setRepositories] = useState<RepositoryOption[]>([]); const [selectedRepository, setSelectedRepository] = useState(0); const [search, setSearch] = useState(""); const [title, setTitle] = useState(""); const [objective, setObjective] = useState(""); const [candidateName, setCandidateName] = useState(""); const [error, setError] = useState<string | null>(null); const [loadAttempt, setLoadAttempt] = useState(0); const submitted = useRef(false);
+  useEffect(() => { let active = true; void actions.repositories().then(({ repositories: values }) => { if (!active) return; const available = workspace ? values.filter((repository) => repository.fullName.toLowerCase() === workspace.repositoryFullName.toLowerCase()) : values; setRepositories(available); setSelectedRepository(0); setStage(available.length ? "title" : "empty"); }, (reason) => { if (active) { setError(reason instanceof Error ? reason.message : String(reason)); setStage("error"); } }); return () => { active = false; }; }, [actions, loadAttempt, workspace]);
+  const filtered = repositories.filter((repository) => repository.fullName.toLowerCase().includes(search.trim().toLowerCase())); const selected = repositories[selectedRepository];
+  const submit = async () => { if (!selected || submitted.current) return; submitted.current = true; setError(null); setStage("submitting"); try { if (workspace) await requireCleanWorkspace(workspace); const created = await actions.createSession({ title: title.trim(), objective: objective.trim() || null, candidateName: candidateName.trim() || title.trim(), repositoryId: selected.id, accountInstallationId: selected.accountInstallationId }); const ready = created.setupStatus === "ready"; onCreated(created.session.id, ready, ready ? "Session created." : created.setupError ?? "Session created, but repository setup needs attention."); } catch (reason) { submitted.current = false; setError(reason instanceof Error ? reason.message : String(reason)); setStage("error"); } };
+  useInput((input, key) => { if (stage === "repository") { if (key.upArrow) setSelectedRepository((value) => Math.max(0, value - 1)); else if (key.downArrow) setSelectedRepository((value) => Math.min(repositories.length - 1, value + 1)); else if (input === "/") { setSearch(""); setStage("repository-search"); } else if (key.return && selected) setStage("confirm"); else if (key.escape) setStage("candidate"); return; } if (stage === "confirm") { if (key.return) void submit(); else if (key.escape) setStage("repository"); return; } if (stage === "empty" && key.return) { void open(`${baseUrl}/home/settings?section=connections`); return; } if (stage === "error" && input.toLowerCase() === "r") { setError(null); if (repositories.length) setStage("confirm"); else { setStage("loading"); setLoadAttempt((value) => value + 1); } return; } if (!key.escape) return; if (stage === "objective") setStage("title"); else if (stage === "candidate") setStage("objective"); else if (stage === "repository-search") setStage("repository"); else if (!["loading", "submitting"].includes(stage)) close(); });
+  return <Modal title={workspace ? `New local session · ${workspace.repositoryFullName}` : "New session"}>
     {stage === "loading" && <Text color="cyan">Loading GitHub repositories…</Text>}
-    {stage === "empty" && <><Text>No repositories available.</Text><Text>Press Enter to add GitHub access in Account Settings.</Text><Text dimColor>Esc closes.</Text></>}
+    {stage === "empty" && <><Text>{workspace ? `${workspace.repositoryFullName} is not available to openfloor.` : "No repositories available."}</Text><Text>Press Enter to update GitHub access.</Text></>}
     {stage === "title" && <><Text>Task</Text><TextInput placeholder="What is this session for?" onSubmit={(value) => { const next = value.trim(); if (next) { setTitle(next.slice(0, 100)); setCandidateName(next.slice(0, 100)); setStage("objective"); } }} /></>}
-    {stage === "objective" && <><Text>Goal <Text dimColor>(optional)</Text></Text><TextInput placeholder="Press Enter to skip" onSubmit={(value) => { setObjective(value.slice(0, 2_000)); setStage("candidate"); }} /><Text dimColor>Esc returns to task.</Text></>}
-    {stage === "candidate" && <><Text>Candidate branch name</Text><TextInput defaultValue={candidateName || title} placeholder={title} onSubmit={(value) => { setCandidateName((value.trim() || title).slice(0, 100)); setStage("repository"); }} /><Text dimColor>Defaults to task. Esc returns to goal.</Text></>}
-    {stage === "repository" && <><Text>Select repository</Text>{repositories.slice(Math.max(0, selectedRepository - 4), selectedRepository + 5).map((repository) => { const index = repositories.indexOf(repository); return <Selectable key={`${repository.accountInstallationId}:${repository.id}`} active={index === selectedRepository}>{repository.fullName} · {repository.defaultBranch}{repository.private ? " · private" : ""}</Selectable>; })}<Text dimColor>↑↓ select · / search · Enter continue · Esc back</Text></>}
-    {stage === "repository-search" && <><Text>Search repositories</Text><TextInput placeholder="owner/repository" onChange={setSearch} onSubmit={() => { const first = filteredRepositories[0]; if (!first) return; setSelectedRepository(repositories.indexOf(first)); setStage("repository"); }} />{filteredRepositories.slice(0, 6).map((repository, index) => <Text key={`${repository.accountInstallationId}:${repository.id}`} {...(index === 0 ? { color: "cyan" as const } : {})}>{index === 0 ? "›" : " "} {repository.fullName}</Text>)}{filteredRepositories.length === 0 && <Text color="yellow">No matching repositories.</Text>}<Text dimColor>Enter selects first match · Esc cancels search</Text></>}
-    {stage === "confirm" && selected && <><Text bold>{title}</Text><Text>{objective || "No goal provided"}</Text><Text>Repository: {selected.fullName}</Text><Text>Candidate: {candidateName || title}</Text><Text color="cyan">Press Enter to create once. Esc goes back.</Text></>}
+    {stage === "objective" && <><Text>Goal <Text dimColor>(optional)</Text></Text><TextInput placeholder="Press Enter to skip" onSubmit={(value) => { setObjective(value.slice(0, 2_000)); setStage("candidate"); }} /></>}
+    {stage === "candidate" && <><Text>Candidate branch name</Text><TextInput defaultValue={candidateName || title} placeholder={title} onSubmit={(value) => { setCandidateName((value.trim() || title).slice(0, 100)); setStage("repository"); }} /></>}
+    {stage === "repository" && <><Text>Select repository</Text>{repositories.map((repository, index) => <Text key={`${repository.accountInstallationId}:${repository.id}`} inverse={index === selectedRepository} {...(index === selectedRepository ? { color: "cyan" as const } : {})}>{index === selectedRepository ? "›" : " "} {repository.fullName} · {repository.defaultBranch}</Text>)}<Text dimColor>↑↓ select · / search · Enter continue</Text></>}
+    {stage === "repository-search" && <><Text>Search repositories</Text><TextInput placeholder="owner/repository" onChange={setSearch} onSubmit={() => { const first = filtered[0]; if (first) { setSelectedRepository(repositories.indexOf(first)); setStage("repository"); } }} />{filtered.slice(0, 6).map((repository, index) => <Text key={repository.id} {...(index === 0 ? { color: "cyan" as const } : {})}>{index === 0 ? "›" : " "} {repository.fullName}</Text>)}</>}
+    {stage === "confirm" && selected && <><Text bold>{title}</Text><Text>{objective || "No goal provided"}</Text><Text>Repository: {selected.fullName}</Text><Text>Candidate: {candidateName || title}</Text>{workspace && <Text color="yellow">Creation requires a clean worktree. It will switch to the server candidate branch, then receive fast-forward updates. Local edits are never uploaded.</Text>}<Text color="cyan">Press Enter to create once. Esc goes back.</Text></>}
     {stage === "submitting" && <Text color="cyan">Creating session and candidate branch…</Text>}
     {stage === "error" && <><Text color="red">{error ?? "Unable to create session."}</Text><Text dimColor>Press r to retry or Esc to close.</Text></>}
   </Modal>;
 }
 
-function Modal({ title, children }: { title: string; children: React.ReactNode }) { return <Box position="absolute" marginLeft={4} marginTop={2} width="90%" flexDirection="column" borderStyle="double" borderColor="cyan" paddingX={1}><Text bold color="cyan">{title}</Text>{children}</Box>; }
+function Modal({ title, children }: { title: string; children: React.ReactNode }) { return <Box position="absolute" marginLeft={3} marginTop={2} width="92%" flexDirection="column" borderStyle="double" borderColor="cyan" paddingX={1}><Text bold color="cyan">{title}</Text>{children}</Box>; }
+function Footer() { return <Box paddingX={1}><Text dimColor>↑↓ select · Enter open · n create · / filter · Ctrl+K command · ? help · q quit</Text></Box>; }
 function ErrorView({ error }: { error: unknown }) { return <Box flexDirection="column"><Text color="red" bold>Unable to load openfloor</Text><Text>{sanitizeTerminal(error instanceof Error ? error.message : String(error))}</Text><Text dimColor>Run openfloor auth login or openfloor doctor.</Text></Box>; }
+function appendActivity(current: Record<string, Array<{ sequence: number; kind: string; detail: string }>>, runId: string, events: Array<{ sequence: number; kind: string; detail: string }>) { const all = [...(current[runId] ?? []), ...events].sort((left, right) => left.sequence - right.sequence); return { ...current, [runId]: all.filter((item, index) => index === 0 || item.sequence !== all[index - 1]!.sequence).slice(-100) }; }
+function floorPaneCount(pane: FloorPane, floor: FloorSnapshot | undefined): number { if (!floor) return 0; if (pane === "chat") return Math.min(14, floor.messages.length); if (pane === "agents") return floor.agents.length; return Math.min(14, floor.queue.length); }
+function recordText(value: unknown, key: string, fallback = ""): string { if (!value || typeof value !== "object" || !(key in value)) return fallback; const entry = (value as Record<string, unknown>)[key]; return typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean" ? String(entry) : fallback; }
+function recordArray(value: unknown, ...keys: string[]): Array<Record<string, unknown>> { if (!value || typeof value !== "object") return []; for (const key of keys) { const entry = (value as Record<string, unknown>)[key]; if (Array.isArray(entry)) return entry.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)); } return []; }
+function sessionGroup(session: SessionSummary): number { return session.endedAt != null ? 2 : session.archivedAt != null ? 1 : 0; }
+function statusColor(status: string): "green" | "yellow" | "red" | "cyan" | "white" { if (["completed", "integrated", "ready", "passed"].includes(status)) return "green"; if (["failed", "cancelled", "conflicted"].includes(status)) return "red"; if (["running", "publishing", "integrating"].includes(status)) return "cyan"; if (["paused", "queued", "pending", "awaiting_input"].includes(status)) return "yellow"; return "white"; }
+function capitalize(value: string): string { return `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`; }
 
-function recordText(value: unknown, key: string, fallback = ""): string {
-  if (!value || typeof value !== "object" || !(key in value)) return fallback;
-  const entry = (value as Record<string, unknown>)[key];
-  return typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean" ? String(entry) : fallback;
-}
-
-function recordArray(value: unknown, ...keys: string[]): Array<Record<string, unknown>> {
-  if (!value || typeof value !== "object") return [];
-  for (const key of keys) {
-    const entry = (value as Record<string, unknown>)[key];
-    if (Array.isArray(entry)) return entry.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item));
-  }
-  return [];
-}
-
-function sessionGroup(session: SessionSummary): number {
-  if (session.endedAt != null) return 2;
-  if (session.archivedAt != null) return 1;
-  return 0;
-}
-
-function sessionRowCount(tab: Tab, members: SessionMember[], floor: FloorSnapshot | undefined, tree: unknown): number {
-  if (!floor) return 0;
-  if (tab === "Overview") return members.length + floor.assignments.length;
-  if (tab === "Agents") return floor.agents.length;
-  if (tab === "Queue") return floor.queue.length;
-  if (tab === "Team") return Math.min(20, floor.messages.length);
-  if (tab === "Review") return Math.min(8, floor.runs.length);
-  if (tab === "Repository") return recordArray(tree, "entries", "tree").slice(0, 20).length;
-  return 4;
-}
-
-async function activateSessionRow(
-  tab: Tab,
-  row: number,
-  members: SessionMember[],
-  floor: FloorSnapshot | undefined,
-  tree: unknown,
-  actions: OpenFloorActions,
-  sessionId: string,
-  setOverlay: React.Dispatch<React.SetStateAction<Overlay>>,
-  setNotice: React.Dispatch<React.SetStateAction<string | null>>,
-): Promise<void> {
-  if (!floor) return;
-  if (tab === "Agents") {
-    const agent = floor.agents[row];
-    if (agent) setOverlay({ kind: "palette", initial: `agents show ${agent.id}` });
-    return;
-  }
-  if (tab === "Queue") {
-    const item = floor.queue[row];
-    if (item) setOverlay({ kind: "palette", initial: `queue show ${item.id}` });
-    return;
-  }
-  if (tab === "Review") {
-    const run = floor.runs.slice(-8)[row];
-    if (run) setOverlay({ kind: "palette", initial: `runs show ${run.id}` });
-    return;
-  }
-  if (tab === "Settings") {
-    setOverlay({ kind: "palette", initial: ["routing show", "members list", "skills list", "sessions show"][row] ?? "sessions show" });
-    return;
-  }
-  if (tab === "Repository") {
-    const entry = recordArray(tree, "entries", "tree").slice(0, 20)[row];
-    const path = recordText(entry, "path");
-    if (!path) return;
-    if (recordText(entry, "type") === "tree") { setNotice(`Directory: ${path}`); return; }
-    try {
-      const file = await actions.get(`/api/sessions/${sessionId}/repository/file?path=${encodeURIComponent(path)}`);
-      setOverlay({ kind: "output", text: `${path}\n\n${recordText(file, "content", "File has no text content.")}` });
-    } catch (reason) { setNotice(reason instanceof Error ? reason.message : String(reason)); }
-    return;
-  }
-  if (tab === "Overview") {
-    const member = members[row];
-    if (member) setOverlay({ kind: "output", text: `${member.displayName}\nRole: ${member.role}\nStatus: ${member.online ? "online" : "offline"}\nID: ${member.id}` });
-    else {
-      const assignment = floor.assignments[row - members.length];
-      if (assignment) setOverlay({ kind: "output", text: `${recordText(assignment, "userName", "Assignment")}\n${recordText(assignment, "task", "Unassigned")}` });
-    }
-    return;
-  }
-  const message = floor.messages.slice(-20)[row] as Record<string, unknown> | undefined;
-  if (message) setOverlay({ kind: "output", text: `${recordText(message, "authorName", "Message")}${recordText(message, "recipientUserId") ? " · DM" : ""}\n\n${recordText(message, "text")}` });
-}
-
-export function formatDuration(seconds: number): string {
-  const whole = Math.max(0, Math.floor(seconds));
-  const hours = Math.floor(whole / 3_600);
-  const minutes = Math.floor((whole % 3_600) / 60);
-  const remainder = whole % 60;
-  return [hours ? `${hours}h` : "", minutes ? `${minutes}m` : "", (!hours && !minutes) || remainder ? `${remainder}s` : ""].filter(Boolean).join(" ");
-}
-
-async function runPalette(line: string, sessionId: string | null, baseUrl: string): Promise<string> {
-  const args = tokenize(line);
-  if (!args.length) return "No command.";
-  args.push("--base-url", baseUrl, "--no-color");
-  if (sessionId) args.push("--session", sessionId);
-  const entry = process.argv[1];
-  if (!entry) throw new Error("CLI entry point unavailable");
-  try {
-    const result = await exec(process.execPath, [entry, ...args], { encoding: "utf8", maxBuffer: 1024 * 1024 });
-    return sanitizeTerminal(`${result.stdout}${result.stderr}`.trim() || "Done.");
-  } catch (reason) {
-    const error = reason as { stderr?: string; stdout?: string; message?: string };
-    const detail = `${error.stdout ?? ""}${error.stderr ?? ""}`.trim() || error.message || "Command failed.";
-    throw new Error(sanitizeTerminal(detail).slice(-8_000));
-  }
-}
-
-export function tokenize(input: string): string[] {
-  const values: string[] = []; let current = ""; let quote: string | null = null; let escaped = false;
-  for (const char of input.trim()) {
-    if (escaped) { current += char; escaped = false; continue; }
-    if (char === "\\") { escaped = true; continue; }
-    if (quote) { if (char === quote) quote = null; else current += char; continue; }
-    if (char === '"' || char === "'") { quote = char; continue; }
-    if (/\s/.test(char)) { if (current) { values.push(current); current = ""; } } else current += char;
-  }
-  if (escaped) current += "\\";
-  if (quote) throw new Error("Unclosed quote");
-  if (current) values.push(current);
-  return values;
-}
+async function runPalette(line: string, sessionId: string | null, baseUrl: string): Promise<void> { const args = tokenize(line); if (!args.length) return; args.push("--base-url", baseUrl, "--no-color", "--quiet"); if (sessionId) args.push("--session", sessionId); const entry = process.argv[1]; if (!entry) throw new Error("CLI entry point unavailable"); try { await exec(process.execPath, [entry, ...args], { encoding: "utf8", maxBuffer: 1024 * 1024 }); } catch (reason) { const error = reason as { stderr?: string; stdout?: string; message?: string }; throw new Error(sanitizeTerminal(`${error.stdout ?? ""}${error.stderr ?? ""}`.trim() || error.message || "Command failed.").slice(-8_000)); } }
+export function tokenize(input: string): string[] { const values: string[] = []; let current = ""; let quote: string | null = null; let escaped = false; for (const char of input.trim()) { if (escaped) { current += char; escaped = false; continue; } if (char === "\\") { escaped = true; continue; } if (quote) { if (char === quote) quote = null; else current += char; continue; } if (char === '"' || char === "'") { quote = char; continue; } if (/\s/.test(char)) { if (current) { values.push(current); current = ""; } } else current += char; } if (escaped) current += "\\"; if (quote) throw new Error("Unclosed quote"); if (current) values.push(current); return values; }
+export function formatDuration(seconds: number): string { const whole = Math.max(0, Math.floor(seconds)); const hours = Math.floor(whole / 3_600); const minutes = Math.floor((whole % 3_600) / 60); const remainder = whole % 60; return [hours ? `${hours}h` : "", minutes ? `${minutes}m` : "", (!hours && !minutes) || remainder ? `${remainder}s` : ""].filter(Boolean).join(" "); }

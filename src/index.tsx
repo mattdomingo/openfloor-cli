@@ -5,6 +5,7 @@ import { exitCodeFor } from "./errors.js";
 import { writeError } from "./output.js";
 import { createRuntime, type GlobalOptions } from "./runtime.js";
 import { enterAlternateScreen, leaveAlternateScreen } from "./terminal.js";
+import { detectLocalWorkspace } from "./workspace.js";
 
 async function main(): Promise<void> {
   let tuiOptions: GlobalOptions = {};
@@ -47,7 +48,15 @@ async function main(): Promise<void> {
     }
     const [{ startTui }] = await Promise.all([import("./tui.js")]);
     const actions = new OpenFloorActions(runtime.client);
-    const instance = render(startTui({ actions, client: runtime.client, baseUrl: runtime.baseUrl, ...(runtime.config.currentSessionId ? { initialSessionId: runtime.config.currentSessionId } : {}) }), { exitOnCtrlC: true });
+    const workspace = await detectLocalWorkspace();
+    const workspaceSession = workspace ? runtime.config.workspaceSessions?.[workspace.root] : undefined;
+    const instance = render(startTui({
+      actions,
+      client: runtime.client,
+      baseUrl: runtime.baseUrl,
+      ...(workspace ? { workspace } : {}),
+      ...(workspaceSession ? { initialSessionId: workspaceSession } : {}),
+    }), { exitOnCtrlC: true });
     await instance.waitUntilExit();
   } finally {
     cleanup(); process.off("SIGTERM", terminate);
