@@ -1,0 +1,29 @@
+name: Check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm pack
+      - name: Tarball install smoke
+        shell: bash
+        run: |
+          prefix="$(mktemp -d)"
+          npm install --global --prefix "$prefix" ./openfloor-cli-*.tgz
+          "$prefix/bin/openfloor" --version
+          "$prefix/bin/openfloor" --help
+          "$prefix/bin/openfloor" doctor --json --base-url http://127.0.0.1:9 || test "$?" -eq 6
