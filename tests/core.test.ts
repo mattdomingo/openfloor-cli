@@ -27,6 +27,7 @@ describe("trust-boundary helpers", () => {
 
   it("requires repository and candidate fields used by local sync", () => {
     const base = { revision: 1, autoDispatch: false, autoProvisionAgents: false, autoResolveConflicts: false, agents: [], assignments: [], messages: [], files: [], queue: [], runs: [], latestPreflight: null, review: null };
+    expect(floorSchema.parse({ ...base, autoAgentProvider: null, repository: null, activeCandidate: null }).autoAgentProvider).toBeNull();
     expect(floorSchema.parse({ ...base, repository: { repositoryFullName: "openfloor/app", status: "ready", future: true }, activeCandidate: { branchName: "openfloor/candidate", candidateSha: null, remoteCandidateSha: "a".repeat(40), status: "active", future: true } }).activeCandidate?.remoteCandidateSha).toBe("a".repeat(40));
     expect(() => floorSchema.parse({ ...base, repository: { repositoryFullName: "openfloor/app", status: "ready" }, activeCandidate: { branchName: "openfloor/candidate", status: "active" } })).toThrow();
   });

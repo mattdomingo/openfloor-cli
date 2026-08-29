@@ -60,11 +60,11 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   const syncQueue = useRef<Promise<unknown>>(Promise.resolve());
   const queryClient = useQueryClient();
 
-  const homeQuery = useQuery({ queryKey: ["home"], queryFn: () => actions.home() });
-  const sessionQuery = useQuery({ queryKey: ["session", sessionId], queryFn: () => actions.session(sessionId!), enabled: Boolean(sessionId && workspaceStartupResolved) });
-  const floorQuery = useQuery({ queryKey: ["floor", sessionId], queryFn: () => actions.floor(sessionId!), enabled: Boolean(sessionId && workspaceStartupResolved), refetchInterval: connection === "live" ? false : 10_000 });
-  const skillsQuery = useQuery({ queryKey: ["skills", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/skills`), enabled: Boolean(sessionId && page === "settings") });
-  const mcpQuery = useQuery({ queryKey: ["mcp", sessionId], queryFn: () => actions.get(`/api/sessions/${sessionId}/mcp-servers`), enabled: Boolean(sessionId && page === "settings") });
+  const homeQuery = useQuery({ queryKey: ["home"], queryFn: ({ signal }) => actions.home(signal) });
+  const sessionQuery = useQuery({ queryKey: ["session", sessionId], queryFn: ({ signal }) => actions.session(sessionId!, signal), enabled: Boolean(sessionId && workspaceStartupResolved) });
+  const floorQuery = useQuery({ queryKey: ["floor", sessionId], queryFn: ({ signal }) => actions.floor(sessionId!, signal), enabled: Boolean(sessionId && workspaceStartupResolved), refetchInterval: connection === "live" ? false : 10_000 });
+  const skillsQuery = useQuery({ queryKey: ["skills", sessionId], queryFn: ({ signal }) => actions.get(`/api/sessions/${sessionId}/skills`, signal), enabled: Boolean(sessionId && page === "settings") });
+  const mcpQuery = useQuery({ queryKey: ["mcp", sessionId], queryFn: ({ signal }) => actions.get(`/api/sessions/${sessionId}/mcp-servers`, signal), enabled: Boolean(sessionId && page === "settings") });
 
   useEffect(() => {
     const resize = () => setWidth(stdout.columns || 100);
@@ -119,6 +119,8 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   }, [homeQuery.data]);
   const homeSelection = Math.max(0, Math.min(selectedSession, Math.max(0, sessions.length - 1)));
   const floor = floorQuery.data?.props.initialFloor;
+  const sessionLoadError = sessionQuery.error ?? floorQuery.error;
+  const sessionLoading = Boolean(sessionId && (!workspaceStartupResolved || sessionQuery.isLoading || floorQuery.isLoading));
   const members = sessionQuery.data?.props.initialMembers ?? [];
   const repositoryName = floor?.repository?.repositoryFullName ?? "";
   const repositoryStatus = floor?.repository?.status ?? "disconnected";
@@ -199,7 +201,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
     syncedCandidate.current = null;
     setSyncAttempt((value) => value + 1);
   };
-  const goSessions = () => { setSessionId(null); setPage("sessions"); setConnection("closed"); setOnline(new Set()); setDrafts([]); setLocalSync("none"); setFloorFocus("prompt"); setFloorDetail(null); setHomeCommandActive(false); setPagePanelFocused(false); void homeQuery.refetch(); };
+  const goSessions = (refresh = true) => { setSessionId(null); setPage("sessions"); setConnection("closed"); setOnline(new Set()); setDrafts([]); setLocalSync("none"); setFloorFocus("prompt"); setFloorDetail(null); setHomeCommandActive(false); setPagePanelFocused(false); if (refresh) void homeQuery.refetch(); };
   const refreshSession = () => { void sessionQuery.refetch(); void floorQuery.refetch(); void homeQuery.refetch(); };
   const runBackground = async (line: string) => {
     try { await runCommand(line, sessionId, baseUrl); setNotice("Command completed in background."); refreshSession(); }
@@ -223,8 +225,30 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   useInput((input, key) => {
     const presence = (globalThis as Record<string, unknown>).__openfloorPresence as PresenceClient | undefined;
     presence?.noteInput();
+    if (key.escape && page === "sessions" && homeQuery.isLoading) {
+      void queryClient.cancelQueries({ queryKey: ["home"] });
+      exit();
+      return;
+    }
     if (["create-session", "bind-workspace", "create-agent", "credentials"].includes(page)) return;
     if (sessionId) {
+      if (key.escape && sessionLoading) {
+        if (homeQuery.isLoading && !homeQuery.data) void queryClient.cancelQueries({ queryKey: ["home"] });
+        void queryClient.cancelQueries({ queryKey: ["session", sessionId] });
+        void queryClient.cancelQueries({ queryKey: ["floor", sessionId] });
+        if (homeQuery.isLoading && !homeQuery.data) {
+          exit();
+          return;
+        }
+        setNotice("Session loading stopped.");
+        goSessions(false);
+        return;
+      }
+      if (sessionLoadError) {
+        if (key.escape) goSessions(false);
+        else if (input === "r") refreshSession();
+        return;
+      }
       if (key.ctrl && input === "k") { setFloorFocus("prompt"); setFloorDetail(null); return; }
       if (input === "?" && page === "floor") { setPage("help"); setFloorFocus("prompt"); setFloorDetail(null); return; }
       if (page !== "floor") {
@@ -264,7 +288,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   });
 
   if (width < 60) return <Box flexDirection="column"><Text bold color="red">Terminal too narrow ({width} columns)</Text><Text>Resize to at least 60 columns.</Text></Box>;
-  if (homeQuery.isLoading && page === "sessions") return <Text color="cyan">Loading openfloor…</Text>;
+  if (homeQuery.isLoading && page === "sessions") return <LoadingView message="Loading openfloor…" escape="Esc stops and exits" />;
   if (homeQuery.error && page === "sessions") return <ErrorView error={homeQuery.error} />;
 
   return <Box flexDirection="column" width="100%">
@@ -278,10 +302,12 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
     {page === "bind-workspace" && workspace && floor && <BindWorkspaceConfirm workspace={workspace} repositoryName={repositoryName} branch={candidateBranch} sha={candidateSha} close={() => setPage("floor")} confirm={enableWorkspaceSync} />}
     {page === "bind-workspace" && (!workspace || !floor) && <PageFrame title="Local sync unavailable"><Text>No matching local GitHub workspace is available.</Text><Text dimColor>Esc returns to the floor.</Text></PageFrame>}
     {page === "create-agent" && sessionId && <CreateAgentPage actions={actions} sessionId={sessionId} members={members} close={() => setPage("floor")} completed={() => { refreshSession(); setNotice("Agent created."); setPage("floor"); }} />}
-    {sessionId && isSessionPage(page) && (floor ? <>
+    {sessionId && isSessionPage(page) && (sessionLoadError
+      ? <SessionLoadError error={sessionLoadError} />
+      : floor ? <>
       {page === "floor" ? floorDetail ? <FloorItemDetail detail={floorDetail} floor={floor} drafts={drafts} activities={activities} /> : <FloorDashboard width={width} floor={floor} online={online} drafts={drafts} activities={activities} focus={floorFocus} rows={paneRows} /> : <PageView page={page} floor={floor} members={members} owner={sessionQuery.data?.props.session.role === "owner"} online={online} skills={skillsQuery.data} mcp={mcpQuery.data} active={pagePanelFocused} focusPrompt={() => setPagePanelFocused(false)} actions={actions} sessionId={sessionId} refresh={refreshSession} setNotice={setNotice} {...(workspace ? { workspace } : {})} localSync={effectiveLocalSync} />}
       <CommandBar key={page} page={page} sessionId={sessionId} actions={actions} {...((globalThis as Record<string, unknown>).__openfloorPresence ? { presence: (globalThis as Record<string, unknown>).__openfloorPresence as PresenceClient } : {})} focused={page === "floor" ? floorFocus === "prompt" && !floorDetail : !pagePanelFocused} navigate={(next) => { setPage(next); setFloorDetail(null); setFloorFocus("prompt"); setPagePanelFocused(false); }} openCredentials={() => { setCredentialsReturn("floor"); setPage("credentials"); }} goSessions={goSessions} refresh={refreshSession} retryWorkspaceSync={retryWorkspaceSync} runBackground={runBackground} logout={logout} setNotice={setNotice} />
-    </> : <Text color="cyan">Loading session floor…</Text>)}
+    </> : <LoadingView message="Loading session floor…" escape={homeQuery.isLoading && !homeQuery.data ? "Esc stops and exits" : "Esc stops and returns to Sessions"} />)}
     {isHomePage(page) && <HomeCommandBar active={homeCommandActive} setActive={setHomeCommandActive} page={page} submit={executeHomeCommand} setNotice={setNotice} />}
   </Box>;
 }
@@ -351,12 +377,14 @@ function PageView({ page, floor, members, owner, online, skills, mcp, workspace,
 }
 
 function ReviewPage({ actions, sessionId, floor, active, focusPrompt }: { actions: OpenFloorActions; sessionId: string; floor: FloorSnapshot; active: boolean; focusPrompt: () => void }) {
+  const queryClient = useQueryClient();
   const [status, setStatus] = useState<"active" | "rolled_back">("active");
   const [mode, setMode] = useState<"files" | "prompts">("files");
   const [phase, setPhase] = useState<"list" | "files" | "diff">("list");
   const [selected, setSelected] = useState(0); const [fileSelected, setFileSelected] = useState(0); const [offset, setOffset] = useState(0); const [runId, setRunId] = useState<string | null>(null); const [targetPath, setTargetPath] = useState<string | null>(null); const [wrap, setWrap] = useState(true);
-  const list = useQuery({ queryKey: ["review-contributions", sessionId, status], queryFn: () => actions.reviewContributions(sessionId, status) });
-  const detail = useQuery({ queryKey: ["review-contribution", sessionId, runId], queryFn: () => actions.reviewContribution(sessionId, runId!), enabled: Boolean(runId) });
+  const [loadingStopped, setLoadingStopped] = useState(false);
+  const list = useQuery({ queryKey: ["review-contributions", sessionId, status], queryFn: ({ signal }) => actions.reviewContributions(sessionId, status, signal) });
+  const detail = useQuery({ queryKey: ["review-contribution", sessionId, runId], queryFn: ({ signal }) => actions.reviewContribution(sessionId, runId!, signal), enabled: Boolean(runId) });
   const fileRows = useMemo(() => (list.data?.items ?? []).flatMap((item) => item.files.map((file) => ({ runId: item.runId, agentName: item.agentName, prompt: item.prompts[0]?.text ?? "", file }))), [list.data]);
   const rows = mode === "files" ? fileRows : list.data?.items ?? [];
   const contribution = detail.data?.contribution;
@@ -365,6 +393,19 @@ function ReviewPage({ actions, sessionId, floor, active, focusPrompt }: { action
   const diffFile = targetPath ? files.find((file) => file.path === targetPath) ?? selectedFile : selectedFile;
   const diff = diffFile?.diff ?? [];
   useInput((input, key) => {
+    if (key.escape && (list.isLoading || detail.isLoading)) {
+      void queryClient.cancelQueries({ queryKey: ["review-contributions", sessionId] });
+      void queryClient.cancelQueries({ queryKey: ["review-contribution", sessionId] });
+      setLoadingStopped(true);
+      focusPrompt();
+      return;
+    }
+    if (input === "r" && loadingStopped) {
+      setLoadingStopped(false);
+      void list.refetch();
+      if (runId) void detail.refetch();
+      return;
+    }
     if (key.escape) { if (phase === "diff") { setPhase(mode === "files" ? "list" : "files"); setOffset(0); } else if (phase === "files") setPhase("list"); else focusPrompt(); return; }
     if (input === "v" && phase === "list") { setMode((value) => value === "files" ? "prompts" : "files"); setSelected(0); setRunId(null); return; }
     if (input === "h" && phase === "list") { setStatus((value) => value === "active" ? "rolled_back" : "active"); setSelected(0); setRunId(null); return; }
@@ -376,11 +417,11 @@ function ReviewPage({ actions, sessionId, floor, active, focusPrompt }: { action
       if (mode === "files") { const row = fileRows[selected]!; setRunId(row.runId); setTargetPath(row.file.path); setPhase("diff"); }
       else { const item = rows[selected] as ReviewContribution; setRunId(item.runId); setTargetPath(null); setFileSelected(0); setPhase("files"); }
     } else if (key.return && phase === "files" && selectedFile) { setTargetPath(selectedFile.path); setOffset(0); setPhase("diff"); }
-  }, { isActive: active });
+  }, { isActive: active || list.isLoading || detail.isLoading });
   const review = floor.review;
   return <Box flexDirection="column" borderStyle={active ? "double" : "round"} borderColor={active ? "cyan" : "gray"} paddingX={1} minHeight={22}><Text bold color="cyan">/review · {status === "active" ? "Active" : "History"} · {capitalize(mode)}</Text>
     {!review && !list.isLoading && (list.data?.items.length ?? 0) === 0 && <Text dimColor>No review available.</Text>}
-    {list.isLoading && <Text color="cyan">Loading review contributions…</Text>}{list.error && <Text color="red">{errorMessage(list.error)}</Text>}
+    {list.isLoading && !loadingStopped && <Text color="cyan">Loading review contributions… · Esc stops</Text>}{loadingStopped && !list.data && <Text color="yellow">Review loading stopped. Tab into Review and press r to retry.</Text>}{list.error && <Text color="red">{errorMessage(list.error)}</Text>}
     {phase === "list" && mode === "files" && fileRows.slice(0, 18).map((row, index) => <Text key={`${row.runId}:${row.file.path}`} inverse={active && index === selected}>{row.file.changeKind.padEnd(9)} {row.file.path} <Text dimColor>+{row.file.additions} -{row.file.deletions} · {row.agentName}</Text></Text>)}
     {phase === "list" && mode === "prompts" && (list.data?.items ?? []).slice(0, 18).map((item, index) => <Text key={item.runId} inverse={active && index === selected}>{shortId(item.runId)} · {item.agentName} · {item.prompts.map((prompt) => prompt.text).join(" / ").slice(0, 100)}</Text>)}
     {phase === "files" && <><Text bold>{contribution?.prompts.map((prompt) => prompt.text).join(" / ") ?? "Loading prompt…"}</Text>{files.map((file, index) => <Text key={file.path} inverse={active && index === fileSelected}>{file.changeKind.padEnd(9)} {file.path} <Text dimColor>+{file.additions} -{file.deletions}</Text></Text>)}</>}
@@ -526,7 +567,7 @@ function CreateAgentPage({ actions, sessionId, members, close, completed }: { ac
 
 type CredentialStage = "list" | "secret" | "confirm-connect" | "confirm-disconnect" | "working" | "error";
 function CredentialsPage({ actions, close, setNotice }: { actions: OpenFloorActions; close: () => void; setNotice: (message: string) => void }) {
-  const queryClient = useQueryClient(); const credentials = useQuery({ queryKey: ["credentials"], queryFn: () => actions.credentials() });
+  const queryClient = useQueryClient(); const credentials = useQuery({ queryKey: ["credentials"], queryFn: ({ signal }) => actions.credentials(signal) });
   const options = PROVIDERS.flatMap((provider) => PROVIDER_CREDENTIAL_KINDS[provider].map((kind) => ({ provider, kind })));
   const [selected, setSelected] = useState(0); const [stage, setStage] = useState<CredentialStage>("list"); const [secret, setSecret] = useState(""); const [error, setError] = useState<string | null>(null); const attempted = useRef(false);
   const option = options[selected]!; const existing = credentials.data?.credentials.find((item) => item.provider === option.provider && item.kind === option.kind);
@@ -549,7 +590,7 @@ function CredentialsPage({ actions, close, setNotice }: { actions: OpenFloorActi
   }, { isActive: stage !== "secret" && stage !== "working" });
   return <PageFrame title="AI credentials">
     <Text>Write-only connection flow. Secrets never enter shell history, config, logs, drafts, or rendered output.</Text>
-    {credentials.isLoading && <Text color="cyan">Loading credential status…</Text>}{credentials.error && <Text color="red">{errorMessage(credentials.error)}</Text>}
+    {credentials.isLoading && <Text color="cyan">Loading credential status… · Esc stops and returns</Text>}{credentials.error && <Text color="red">{errorMessage(credentials.error)}</Text>}
     {stage === "list" && options.map((item, index) => { const found = credentials.data?.credentials.find((credential) => credential.provider === item.provider && credential.kind === item.kind); return <Text key={`${item.provider}:${item.kind}`} inverse={index === selected}>{credentialLabel(item.provider, item.kind).padEnd(28)} {found ? `Connected ····${found.fingerprint}${found.validatedAt ? "" : " · not yet verified"}` : "Not connected"}</Text>; })}
     {stage === "secret" && <><Text bold>{credentialLabel(option.provider, option.kind)}</Text><Text>{option.provider === "openai" && option.kind === "oauth" ? "Paste complete auth.json. Ctrl+J inserts newline." : "Paste credential."}</Text><EditableInput value={secret} onChange={setSecret} secret multiline={option.provider === "openai" && option.kind === "oauth"} placeholder="Secret hidden" onEscape={() => { clearSecret(); setStage("list"); }} onSubmit={(value) => { if (value.trim()) setStage("confirm-connect"); }} /></>}
     {stage === "confirm-connect" && <><Text>Connect {credentialLabel(option.provider, option.kind)}?</Text><Text>Secret is hidden and will be sent directly to openfloor for encrypted storage.</Text><Text color="cyan">Enter connects once · Esc cancels</Text></>}
@@ -571,12 +612,12 @@ function BindWorkspaceConfirm({ workspace, repositoryName, branch, sha, close, c
 type CreateStage = "loading" | "empty" | "title" | "objective" | "candidate" | "repository" | "repository-search" | "confirm" | "submitting" | "load-error" | "preflight-error" | "mutation-error" | "provision-failed";
 function CreateSessionWizard({ actions, baseUrl, close, workspace, onCreated }: { actions: OpenFloorActions; baseUrl: string; close: () => void; workspace?: LocalWorkspace; onCreated: (id: string, ready: boolean, message: string) => void }) {
   const [stage, setStage] = useState<CreateStage>("loading"); const [repositories, setRepositories] = useState<RepositoryOption[]>([]); const [selectedRepository, setSelectedRepository] = useState(0); const [search, setSearch] = useState(""); const [title, setTitle] = useState(""); const [objective, setObjective] = useState(""); const [candidateName, setCandidateName] = useState(""); const [error, setError] = useState<string | null>(null); const [loadAttempt, setLoadAttempt] = useState(0); const submitted = useRef(false);
-  useEffect(() => { let active = true; void actions.repositories().then(({ repositories: values }) => { if (!active) return; const available = workspace ? values.filter((repository) => repository.fullName.toLowerCase() === workspace.repositoryFullName.toLowerCase()) : values; setRepositories(available); setSelectedRepository(0); setStage(available.length ? "title" : "empty"); }, (reason) => { if (active) { setError(reason instanceof Error ? reason.message : String(reason)); setStage("load-error"); } }); return () => { active = false; }; }, [actions, loadAttempt, workspace]);
+  useEffect(() => { let active = true; const controller = new AbortController(); void actions.repositories(controller.signal).then(({ repositories: values }) => { if (!active) return; const available = workspace ? values.filter((repository) => repository.fullName.toLowerCase() === workspace.repositoryFullName.toLowerCase()) : values; setRepositories(available); setSelectedRepository(0); setStage(available.length ? "title" : "empty"); }, (reason) => { if (active && !controller.signal.aborted) { setError(reason instanceof Error ? reason.message : String(reason)); setStage("load-error"); } }); return () => { active = false; controller.abort(); }; }, [actions, loadAttempt, workspace]);
   const filtered = repositories.filter((repository) => repository.fullName.toLowerCase().includes(search.trim().toLowerCase())); const selected = repositories[selectedRepository];
   const submit = async () => { if (!selected || submitted.current) return; submitted.current = true; setError(null); setStage("submitting"); if (workspace) { try { await requireCleanWorkspace(workspace); } catch (reason) { submitted.current = false; setError(reason instanceof Error ? reason.message : String(reason)); setStage("preflight-error"); return; } } try { const created = await actions.createSession({ title: title.trim(), objective: objective.trim() || null, candidateName: candidateName.trim() || title.trim(), repositoryId: selected.id, accountInstallationId: selected.accountInstallationId }); const ready = created.setupStatus === "ready"; const message = ready ? "Session created." : created.setupError ?? "Session created, but repository setup needs attention."; if (!ready) { setError(message); setStage("provision-failed"); } onCreated(created.session.id, ready, message); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); setStage("mutation-error"); } };
-  useInput((input, key) => { if (stage === "repository") { if (key.upArrow) setSelectedRepository((value) => Math.max(0, value - 1)); else if (key.downArrow) setSelectedRepository((value) => Math.min(repositories.length - 1, value + 1)); else if (input.toLowerCase() === "s") { setSearch(""); setStage("repository-search"); } else if (key.return && selected) setStage("confirm"); else if (key.escape) setStage("candidate"); return; } if (stage === "confirm") { if (key.return) void submit(); else if (key.escape) setStage("repository"); return; } if (stage === "empty" && key.return) { void open(`${baseUrl}/home/settings?section=connections`); return; } if (stage === "load-error" && input.toLowerCase() === "r") { setError(null); setStage("loading"); setLoadAttempt((value) => value + 1); return; } if (stage === "preflight-error" && input.toLowerCase() === "r") { setError(null); setStage("confirm"); return; } if (!key.escape) return; if (stage === "objective") setStage("title"); else if (stage === "candidate") setStage("objective"); else if (stage === "repository-search") setStage("repository"); else if (!["loading", "submitting"].includes(stage)) close(); });
+  useInput((input, key) => { if (stage === "repository") { if (key.upArrow) setSelectedRepository((value) => Math.max(0, value - 1)); else if (key.downArrow) setSelectedRepository((value) => Math.min(repositories.length - 1, value + 1)); else if (input.toLowerCase() === "s") { setSearch(""); setStage("repository-search"); } else if (key.return && selected) setStage("confirm"); else if (key.escape) setStage("candidate"); return; } if (stage === "confirm") { if (key.return) void submit(); else if (key.escape) setStage("repository"); return; } if (stage === "empty" && key.return) { void open(`${baseUrl}/home/settings?section=connections`); return; } if (stage === "load-error" && input.toLowerCase() === "r") { setError(null); setStage("loading"); setLoadAttempt((value) => value + 1); return; } if (stage === "preflight-error" && input.toLowerCase() === "r") { setError(null); setStage("confirm"); return; } if (!key.escape) return; if (stage === "objective") setStage("title"); else if (stage === "candidate") setStage("objective"); else if (stage === "repository-search") setStage("repository"); else if (stage !== "submitting") close(); });
   return <PageFrame title={workspace ? `New local session · ${workspace.repositoryFullName}` : "New session"}>
-    {stage === "loading" && <Text color="cyan">Loading GitHub repositories…</Text>}
+    {stage === "loading" && <Text color="cyan">Loading GitHub repositories… · Esc stops and returns</Text>}
     {stage === "empty" && <><Text>{workspace ? `${workspace.repositoryFullName} is not available to openfloor.` : "No repositories available."}</Text><Text>Press Enter to update GitHub access.</Text></>}
     {stage === "title" && <><Text>Task</Text><EditableInput key={stage} value={title} onChange={(value) => setTitle(value.slice(0, 100))} placeholder="What is this session for?" onSubmit={(value) => { const next = value.trim(); if (next) { setTitle(next); setCandidateName(next); setStage("objective"); } }} /></>}
     {stage === "objective" && <><Text>Goal <Text dimColor>(optional)</Text></Text><EditableInput key={stage} value={objective} onChange={(value) => setObjective(value.slice(0, 2_000))} placeholder="Press Enter to skip" onSubmit={() => setStage("candidate")} /></>}
@@ -592,6 +633,8 @@ function CreateSessionWizard({ actions, baseUrl, close, workspace, onCreated }: 
   </PageFrame>;
 }
 
+function LoadingView({ message, escape }: { message: string; escape: string }) { return <Box flexDirection="column"><Text color="cyan">{message}</Text><Text dimColor>{escape}</Text></Box>; }
+function SessionLoadError({ error }: { error: unknown }) { return <Box flexDirection="column"><Text color="red" bold>Unable to load session floor</Text><Text>{errorMessage(error)}</Text><Text dimColor>Esc returns to Sessions · r retries</Text></Box>; }
 function ErrorView({ error }: { error: unknown }) { return <Box flexDirection="column"><Text color="red" bold>Unable to load openfloor</Text><Text>{sanitizeTerminal(error instanceof Error ? error.message : String(error))}</Text><Text dimColor>Run openfloor auth login or openfloor doctor.</Text></Box>; }
 function appendActivity(current: Record<string, Array<{ sequence: number; kind: string; detail: string }>>, runId: string, events: Array<{ sequence: number; kind: string; detail: string }>) { const all = [...(current[runId] ?? []), ...events].sort((left, right) => left.sequence - right.sequence); return { ...current, [runId]: all.filter((item, index) => index === 0 || item.sequence !== all[index - 1]!.sequence).slice(-100) }; }
 function floorPaneCount(pane: FloorPane, floor: FloorSnapshot | undefined, drafts: TypingDraft[]): number { if (!floor) return 0; if (pane === "chat") return Math.min(10, teamMessages(floor).length); if (pane === "drafts") return Math.min(6, drafts.length); if (pane === "agents") return floor.agents.length + 1; return Math.min(14, floor.queue.length); }

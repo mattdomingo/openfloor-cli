@@ -23,6 +23,21 @@ describe("TUI", () => {
     expect(instance.lastFrame()).toContain("45m 7s used this month");
   });
 
+  it("stops initial loading with Escape", async () => {
+    let aborted = false;
+    const actions = {
+      home: (signal?: AbortSignal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => { aborted = true; reject(new DOMException("Stopped", "AbortError")); }, { once: true });
+      }),
+    } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "Loading openfloor…");
+    instance.stdin.write("\u001b");
+    await pause(50);
+    expect(aborted).toBe(true);
+  });
+
   it("opens help from keyboard", async () => {
     const actions = { home: () => Promise.resolve({ props: { sessions: [], usage } }) } as unknown as OpenFloorActions;
     const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
@@ -191,6 +206,53 @@ describe("TUI", () => {
     expect(instance.lastFrame()).toContain("CLI floor");
   });
 
+  it("stops session loading with Escape and returns to Sessions", async () => {
+    const { actions, client, session } = floorHarness();
+    let aborted = false;
+    Object.assign(actions, {
+      floor: (_id: string, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => { aborted = true; reject(new DOMException("Stopped", "AbortError")); }, { once: true });
+      }),
+    });
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Loading session floor…");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "Sessions");
+    expect(aborted).toBe(true);
+    expect(instance.lastFrame()).toContain("Session loading stopped.");
+  });
+
+  it("shows session load errors instead of an endless loading state", async () => {
+    const { actions, client, session } = floorHarness();
+    Object.assign(actions, { floor: () => Promise.reject(new Error("Server response is incompatible with this CLI")) });
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Unable to load session floor");
+    expect(instance.lastFrame()).toContain("Server response is incompatible with this CLI");
+    expect(instance.lastFrame()).not.toContain("Loading session floor…");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "Sessions");
+  });
+
+  it("stops repository loading with Escape", async () => {
+    let aborted = false;
+    const actions = {
+      home: () => Promise.resolve({ props: { sessions: [], usage } }),
+      repositories: (signal?: AbortSignal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => { aborted = true; reject(new DOMException("Stopped", "AbortError")); }, { once: true });
+      }),
+    } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "Sessions");
+    instance.stdin.write("n");
+    await waitForFrame(instance, "Loading GitHub repositories…");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "Sessions");
+    expect(aborted).toBe(true);
+  });
+
   it("stacks floor panes on narrow terminals", async () => {
     const { actions, client, session } = floorHarness();
     const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
@@ -288,6 +350,25 @@ describe("TUI", () => {
     expect(instance.lastFrame()).toContain("wrap on");
   });
 
+  it("stops review loading with Escape even while command bar has focus", async () => {
+    const { actions, client, session, floor } = floorHarness({ review: { pullRequest: { url: "https://github.com/openfloor/app/pull/1" } } });
+    let aborted = false;
+    Object.assign(actions, {
+      floor: () => Promise.resolve({ props: { initialFloor: floor } }),
+      reviewContributions: (_id: string, _status: string, signal?: AbortSignal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => { aborted = true; reject(new DOMException("Stopped", "AbortError")); }, { once: true });
+      }),
+    });
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "Prompt queue");
+    instance.stdin.write("/review"); await pause(); instance.stdin.write("\r");
+    await waitForFrame(instance, "Loading review contributions…");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "Review loading stopped");
+    expect(aborted).toBe(true);
+  });
+
   it("pastes credentials without rendering or persisting the secret", async () => {
     const connectCredential = vi.fn().mockResolvedValue({ credential: credentialSummary("openai", "api_key") });
     const actions = { home: () => Promise.resolve({ props: { sessions: [], usage } }), credentials: () => Promise.resolve({ credentials: [] }), connectCredential, disconnectCredential: vi.fn() } as unknown as OpenFloorActions;
@@ -300,6 +381,24 @@ describe("TUI", () => {
     instance.stdin.write("\r"); await waitForFrame(instance, "sent directly"); instance.stdin.write("\r"); await pause(80);
     expect(connectCredential).toHaveBeenCalledWith("openai", { apiKey: "sk-test-super-secret" });
     expect(instance.lastFrame()).not.toContain("sk-test-super-secret");
+  });
+
+  it("stops credential loading with Escape", async () => {
+    let aborted = false;
+    const actions = {
+      home: () => Promise.resolve({ props: { sessions: [], usage } }),
+      credentials: (signal?: AbortSignal) => new Promise((_resolve, reject) => {
+        signal?.addEventListener("abort", () => { aborted = true; reject(new DOMException("Stopped", "AbortError")); }, { once: true });
+      }),
+    } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "Type / for commands");
+    instance.stdin.write("/"); await pause(); instance.stdin.write("credentials"); await pause(); instance.stdin.write("\r");
+    await waitForFrame(instance, "Loading credential status…");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "Sessions");
+    expect(aborted).toBe(true);
   });
 
   it("sorts live queue work above terminal results", () => {

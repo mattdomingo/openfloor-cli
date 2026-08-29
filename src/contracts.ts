@@ -89,7 +89,7 @@ export const candidateSchema = z.object({
 
 export const floorSchema = z.object({
   revision: z.number(), autoDispatch: z.boolean(), autoProvisionAgents: z.boolean(), autoResolveConflicts: z.boolean(),
-  autoAgentProvider: z.enum(["openai", "anthropic", "kimi", "gemini", "glm"]).optional(),
+  autoAgentProvider: z.enum(["openai", "anthropic", "kimi", "gemini", "glm"]).nullable().optional(),
   agents: z.array(agentSchema), assignments: z.array(loose), messages: z.array(loose), files: z.array(loose),
   queue: z.array(queueItemSchema), runs: z.array(runSchema), repository: repositorySchema.nullable(), activeCandidate: candidateSchema.nullable(),
   latestPreflight: loose.nullable(), review: loose.nullable(),
