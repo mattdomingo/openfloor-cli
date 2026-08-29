@@ -5,18 +5,20 @@ import { delimiter, join } from "node:path";
 import { promisify } from "node:util";
 import { Box, Text, useApp, useInput, useStdout } from "ink";
 import open from "open";
-import React, { useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { OpenFloorActions } from "./actions.js";
 import { accessToken } from "./auth.js";
 import { ApiClient } from "./client.js";
 import { CURRENT_SETUP_VERSION, isLoopback, updateConfig } from "./config.js";
 import { OpenFloorError } from "./errors.js";
+import { EditableInput } from "./tui-input.js";
 
 const execFile = promisify(execFileCallback);
 const CLOUDFLARED_LINUX_URL = "https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/downloads/";
 const HOMEBREW_URL = "https://brew.sh";
 
-type Stage = "splash" | "checking" | "install-confirm" | "installing" | "authenticating" | "onboarding" | "instructions" | "error" | "done";
+type Stage = "splash" | "checking" | "install-confirm" | "installing" | "authenticating" | "profile-first" | "profile-last" | "profile-github" | "github-device" | "onboarding" | "instructions" | "error" | "done";
+type DeviceFlow = { deviceCode: string; userCode: string; verificationUri: string; interval: number; expiresIn: number; startedAt: number };
 
 export type SetupWizardProps = {
   baseUrl: string;
@@ -71,13 +73,14 @@ export function SetupWizard({ baseUrl, debug, onComplete, onCancel }: SetupWizar
   const [message, setMessage] = useState("Preparing setup…");
   const [binary, setBinary] = useState<string | null>(null);
   const [brew, setBrew] = useState<string | null>(null);
+  const [firstName, setFirstName] = useState(""); const [lastName, setLastName] = useState(""); const [githubHandle, setGithubHandle] = useState(""); const [device, setDevice] = useState<DeviceFlow | null>(null);
 
-  const finish = async () => {
+  const finish = useCallback(async () => {
     await updateConfig({ setupVersion: CURRENT_SETUP_VERSION });
     setStage("done");
     onComplete();
     exit();
-  };
+  }, [exit, onComplete]);
 
   const authenticate = async (cloudflaredPath: string, forceLogin = false) => {
     setStage("authenticating");
@@ -90,9 +93,11 @@ export function SetupWizard({ baseUrl, debug, onComplete, onCancel }: SetupWizar
     }
     const me = await new OpenFloorActions(new ApiClient(baseUrl, { cloudflaredPath })).me();
     if (!me.onboarded) {
-      setStage("onboarding");
-      setMessage("Finish account onboarding in browser, then press Enter.");
-      await open(`${baseUrl}/onboarding`);
+      const names = me.user.displayName.trim().split(/\s+/);
+      if (!firstName) setFirstName(names[0] ?? "");
+      if (!lastName) setLastName(names.slice(1).join(" "));
+      setStage("profile-first");
+      setMessage("Complete your openfloor profile.");
       return;
     }
     await finish();
@@ -134,6 +139,45 @@ export function SetupWizard({ baseUrl, debug, onComplete, onCancel }: SetupWizar
     return () => clearInterval(timer);
   }, [stage]);
 
+  useEffect(() => {
+    if (stage !== "github-device" || !device || !binary) return;
+    let cancelled = false; let interval = device.interval;
+    const actions = new OpenFloorActions(new ApiClient(baseUrl, { cloudflaredPath: binary }));
+    const poll = async () => {
+      while (!cancelled) {
+        await new Promise((resolve) => setTimeout(resolve, Math.max(1, interval) * 1_000));
+        if (cancelled) return;
+        if (Date.now() - device.startedAt > device.expiresIn * 1_000) { setStage("error"); setMessage("GitHub device code expired. Press r to restart setup."); return; }
+        try {
+          const result = await actions.pollGithubDevice(device.deviceCode);
+          if (result.expired) { setStage("error"); setMessage("GitHub device code expired. Press r to restart setup."); return; }
+          if (result.interval) interval = result.interval;
+          if (!result.connected) continue;
+          setMessage("Finishing account setup…");
+          await actions.completeOnboarding({ firstName: firstName.trim(), lastName: lastName.trim(), githubHandle: githubHandle.trim() });
+          await finish(); return;
+        } catch (error) { setStage("error"); setMessage(error instanceof Error ? error.message : String(error)); return; }
+      }
+    };
+    void poll();
+    return () => { cancelled = true; };
+  }, [baseUrl, binary, device, finish, firstName, githubHandle, lastName, stage]);
+
+  const beginGithub = async () => {
+    if (!binary) return;
+    const actions = new OpenFloorActions(new ApiClient(baseUrl, { cloudflaredPath: binary }));
+    setMessage("Saving profile and starting GitHub authorization…");
+    try {
+      await actions.saveOnboardingProfile({ firstName: firstName.trim(), lastName: lastName.trim(), githubHandle: githubHandle.trim() });
+      const started = await actions.startGithubDevice();
+      setDevice({ ...started, startedAt: Date.now() }); setStage("github-device"); setMessage("Authorize openfloor with GitHub.");
+      await open(started.verificationUri);
+    } catch (error) {
+      if (error instanceof OpenFloorError && error.status === 501) { setStage("onboarding"); setMessage("GitHub device flow is unavailable. Finish setup in browser, then press Enter."); await open(`${baseUrl}/onboarding`); return; }
+      setStage("error"); setMessage(error instanceof Error ? error.message : String(error));
+    }
+  };
+
   useInput((input, key) => {
     if ((stage === "splash" || stage === "onboarding") && key.return) {
       void (stage === "splash" ? begin() : binary ? authenticate(binary) : begin()).catch((error) => { setStage("error"); setMessage(error instanceof Error ? error.message : String(error)); });
@@ -150,13 +194,17 @@ export function SetupWizard({ baseUrl, debug, onComplete, onCancel }: SetupWizar
     }
     if (stage === "instructions" && key.return) void open(process.platform === "darwin" ? HOMEBREW_URL : CLOUDFLARED_LINUX_URL);
     if (stage === "error" && input.toLowerCase() === "r") void begin();
-    if (input.toLowerCase() === "q" || key.escape) { onCancel(); exit(); }
-  });
+    if (input.toLowerCase() === "q" || (key.escape && !stage.startsWith("profile"))) { onCancel(); exit(); }
+  }, { isActive: !stage.startsWith("profile") });
 
   if (stage === "splash") return <Splash tick={tick} width={stdout.columns || 80} />;
   return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={2} paddingY={1}>
     <Text bold color="cyan">openfloor setup</Text>
     <Text>{message}</Text>
+    {stage === "profile-first" && <><Text>First name</Text><EditableInput key={stage} value={firstName} onChange={(value) => setFirstName(value.slice(0, 80))} placeholder="First name" onEscape={() => { onCancel(); exit(); }} onSubmit={(value) => { if (value.trim()) setStage("profile-last"); }} /></>}
+    {stage === "profile-last" && <><Text>Last name</Text><EditableInput key={stage} value={lastName} onChange={(value) => setLastName(value.slice(0, 80))} placeholder="Last name" onEscape={() => setStage("profile-first")} onSubmit={(value) => { if (value.trim()) setStage("profile-github"); }} /></>}
+    {stage === "profile-github" && <><Text>GitHub handle <Text dimColor>(optional)</Text></Text><EditableInput key={stage} value={githubHandle} onChange={(value) => setGithubHandle(value.replace(/^@/, "").slice(0, 80))} placeholder="username" onEscape={() => setStage("profile-last")} onSubmit={() => { void beginGithub(); }} /></>}
+    {stage === "github-device" && device && <><Text>Open: {device.verificationUri}</Text><Text bold color="cyan">Code: {device.userCode}</Text><Text>Waiting for GitHub authorization…</Text><Text dimColor>The browser approves access; openfloor never stores your GitHub user token.</Text></>}
     {(stage === "checking" || stage === "installing" || stage === "authenticating") && <Text color="cyan">{spinner(tick)} Working…</Text>}
     {stage === "error" && <Text color="red">Press r to retry or q to quit.</Text>}
     {stage === "instructions" && <Text dimColor>Press Enter to open instructions or q to quit.</Text>}

@@ -27,4 +27,8 @@ JSON output is always one envelope: `{"schemaVersion":1,"ok":true,"data":{}}`. E
 
 Exit codes: 2 usage, 3 authentication, 4 concealed/not found, 5 conflict/refusal, 6 network/upstream, 130 interruption.
 
-On Sessions, `/new`, `/settings`, `/help`, `/logout`, `/sessions`, `/refresh`, `/run`, and `/quit` appear as inline filtered suggestions above the persistent bottom bar. `/` starts command entry and never filters session rows. Inside a session, ordinary bottom-bar text creates a queue prompt. Slash commands navigate (`/floor`, `/overview`, `/review`, `/repository`, `/settings`, `/sessions`), send collaboration data (`/chat`, `/queue`), refresh, retry local candidate sync (`/sync`), logout, quit, or execute any existing CLI command with `/run`. Child-command output stays in the background; the floor shows only concise completion or failure state.
+On Sessions, `/new`, `/settings`, `/credentials`, `/account`, `/help`, `/logout`, `/sessions`, `/refresh`, `/exit`, and `/quit` appear as inline selectable suggestions. `/` never filters session rows. `/exit` and `/quit` both exit there.
+
+Inside sessions, ordinary text queues work. Navigation commands are `/floor`, `/overview`, `/review`, `/settings`, and `/sessions`; `/repository` is absent from TUI while `openfloor repository …` remains scriptable. Direct background aliases include `/invite`, `/members`, `/agents`, `/assignments`, `/routing`, `/queue`, `/chat`, `/files`, `/runs`, `/conflicts`, `/skills`, `/mcp`, and `/review`. `/run` remains accepted but hidden for compatibility. `/exit` returns nested pages to Floor and Floor to Sessions; `/quit` always exits. Child output stays suppressed; bounded sanitized status appears inline.
+
+`/credentials` opens masked write-only connection/disconnection for all server-supported API-key and subscription credential kinds. `/account` opens browser settings. Secrets are never ordinary slash-command arguments.

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 import { bindWorkspaceSession, configPath, readConfig, unbindWorkspaceSession, validateBaseUrl, writeConfig } from "../src/config.js";
-import { bootstrapMeSchema, floorSchema } from "../src/contracts.js";
+import { bootstrapMeSchema, credentialResponseSchema, floorSchema, githubDeviceStartSchema, reviewContributionResponseSchema } from "../src/contracts.js";
 import { OpenFloorError, apiError, exitCodeFor } from "../src/errors.js";
 import { resolveId } from "../src/id.js";
 import { redact, sanitizeTerminal } from "../src/sanitize.js";
@@ -29,6 +29,18 @@ describe("trust-boundary helpers", () => {
     const base = { revision: 1, autoDispatch: false, autoProvisionAgents: false, autoResolveConflicts: false, agents: [], assignments: [], messages: [], files: [], queue: [], runs: [], latestPreflight: null, review: null };
     expect(floorSchema.parse({ ...base, repository: { repositoryFullName: "openfloor/app", status: "ready", future: true }, activeCandidate: { branchName: "openfloor/candidate", candidateSha: null, remoteCandidateSha: "a".repeat(40), status: "active", future: true } }).activeCandidate?.remoteCandidateSha).toBe("a".repeat(40));
     expect(() => floorSchema.parse({ ...base, repository: { repositoryFullName: "openfloor/app", status: "ready" }, activeCandidate: { branchName: "openfloor/candidate", status: "active" } })).toThrow();
+  });
+
+  it("validates credential summaries without accepting returned secrets", () => {
+    const credential = { provider: "openai", kind: "oauth", fingerprint: "1234", validatedAt: null, createdAt: 1, updatedAt: 2, monthSpendMicroUsd: 0, monthlyLimitMicroUsd: null, monthInputTokens: 0, monthOutputTokens: 0 };
+    expect(credentialResponseSchema.parse({ credential }).credential.fingerprint).toBe("1234");
+    expect(() => credentialResponseSchema.parse({ credential: { provider: "openai", kind: "oauth", secret: "forbidden" } })).toThrow();
+  });
+
+  it("validates GitHub device and review contribution contracts", () => {
+    expect(githubDeviceStartSchema.parse({ deviceCode: "device", userCode: "ABCD-EFGH", verificationUri: "https://github.com/login/device", interval: 5, expiresIn: 900 }).interval).toBe(5);
+    const contribution = { runId: "run", queueItemId: "queue", agentId: "agent", agentName: "Builder", agentOwnerUserId: "user", integratedAt: 1, rollbackStatus: null, rollbackFailureReason: null, canRollback: true, prompts: [{ id: "prompt", authorUserId: "user", authorName: "Matt", text: "Build", createdAt: 1 }], files: [{ id: "file", path: "src/app.ts", changeKind: "modified", additions: 1, deletions: 0, summary: null, diff: [{ type: "add", text: "new line" }] }] };
+    expect(reviewContributionResponseSchema.parse({ contribution }).contribution.files[0]?.diff?.[0]?.type).toBe("add");
   });
 
   it("resolves full UUIDs and unique prefixes only", () => {

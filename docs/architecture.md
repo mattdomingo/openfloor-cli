@@ -6,7 +6,7 @@ Cloudflare Access remains identity authority. Production HTTP and WebSocket requ
 
 TUI state separates authoritative HTTP data from ephemeral WebSocket state. Mutation responses adopt only equal/newer floor revisions. `floor.changed` invalidates affected reads; presence and teammate drafts never enter persistent config. Run events deduplicate by sequence and catch up over HTTP after reconnect.
 
-No client code executes agents, clones repositories, calls GitHub directly, or stores provider credentials.
+No client code executes agents or clones repositories. GitHub device authorization uses existing openfloor APIs; the one-use GitHub token remains server-side. Provider secrets pass directly to existing write-only account APIs and never enter local storage.
 
 ## Local workspace bridge
 
@@ -16,11 +16,15 @@ An unbound workspace opens session creation with repository options restricted t
 
 This bridge materializes shared server-agent work locally. It is not a local agent runtime and does not upload local human edits. External candidate pushes remain invalid under the server contract.
 
-Bare TUI startup has one versioned setup gate before application queries. Loopback development completes it without external tools. Production checks an executable `cloudflared`, may run Homebrew with a fixed argument array after explicit confirmation, authenticates through Cloudflare Access, verifies `/api/bootstrap/me`, and opens browser-owned onboarding when required. Only successful completion writes the setup version. Setup and application use separate Ink lifecycles inside one alternate screen; setup clears both its renderer and the viewport before application rendering begins because prior Ink frames may have become static output.
+Bare TUI startup has one versioned setup gate before application queries. Loopback development completes it without external tools. Production checks `cloudflared`, may run Homebrew with fixed arguments after confirmation, authenticates through Access, then uses existing onboarding APIs for profile, GitHub device authorization, and Free completion. A 501 device-flow response falls back to browser onboarding. Device polling honors server intervals, slow-down, and expiry. Only successful completion writes setup version. Setup and application use separate Ink lifecycles; setup clears renderer and viewport before application rendering.
 
 Session creation is a native TUI flow because repository choice is required before the single create mutation. Repository options stay API-authoritative. Local workspaces restrict this set to the matching origin. One option is selected by default; multiple options use keyboard selection/search. Scripted creation accepts owner/name, repository ID/prefix, and installation disambiguation. Creation is never retried after an unknown mutation outcome.
 
-The TUI has one explicit page state. Sessions, creation, workspace binding, floor, overview, review, repository, settings, help, and details replace one another in the normal viewport; navigation never mounts an absolute popup. Sessions has a persistent bottom bar where `/` shows inline filtered commands and `Ctrl+K` focuses the same input. The primary session screen is a three-column collaborative floor at 100 columns or wider: team chat, agents, and prompt queue. Narrower supported terminals stack the same panes. Its bottom bar owns focus by default, submits queue work, or parses bounded slash commands. Tab enters pane navigation; arrows select; Enter opens a detail page; Esc returns to input. `/run` uses the existing command/action layers in a child process; stdout is suppressed and only concise sanitized completion or failure state is shown inline.
+The TUI has one explicit page state. Sessions, creation, workspace binding, floor, overview, review, settings, credentials, agent creation, help, and details replace one another; navigation never mounts an absolute popup. Shared cursor-aware input owns Option+Backspace, paste, slash selection/autocomplete, and secret masking. Sessions has a persistent bottom bar where `/` shows selectable commands.
+
+At 100 columns or wider, floor shows stacked public-chat/live-draft panels, agents, and active-first prompt queue; narrower terminals stack them. Server queue order remains unchanged. Tab cycles panels; Esc restores prompt focus. Review uses contribution list/detail endpoints for Active/History and Files/Prompts inspection. Settings mutates routing through the existing owner-authorized endpoint. Agent creation uses the existing session agent API. Direct slash groups reuse the existing child command runner; `/run` remains hidden compatibility. TUI repository navigation is absent while scriptable repository commands remain.
+
+Credential status reads fingerprints only. Secret entry state is cleared on submit, cancel, and errors; no secret reaches argv, config, drafts, logs, notices, or rendering. Account management beyond credential connection remains browser-owned.
 
 ## Safety
 
