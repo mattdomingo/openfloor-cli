@@ -12,6 +12,7 @@
 - Floor arrows: move between focused panes and rows
 - Floor `Enter`: open selected message, agent, or prompt
 - Floor `Esc`: close detail or return to prompt focus
+- Loading `Esc`: stop the in-flight read and leave the loading page; session loading returns to Sessions
 - `/chat <message>`: send team chat
 - `/floor`, `/overview`, `/review`, `/settings`: navigate
 - `/sessions`: return to session selection

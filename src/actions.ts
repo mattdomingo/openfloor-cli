@@ -28,24 +28,24 @@ export class OpenFloorActions {
   constructor(readonly client: ApiClient) {}
 
   me() { return this.client.request("/api/bootstrap/me", { schema: bootstrapMeSchema }); }
-  home() { return this.client.request("/api/bootstrap/home", { schema: bootstrapHomeSchema }); }
-  session(id: string) { return this.client.request(`/api/bootstrap/session/${encodeURIComponent(id)}`, { schema: bootstrapSessionSchema }); }
-  floor(id: string) { return this.client.request(`/api/bootstrap/session/${encodeURIComponent(id)}/floor`, { schema: bootstrapFloorSchema }); }
+  home(signal?: AbortSignal) { return this.client.request("/api/bootstrap/home", { schema: bootstrapHomeSchema, ...(signal ? { signal } : {}) }); }
+  session(id: string, signal?: AbortSignal) { return this.client.request(`/api/bootstrap/session/${encodeURIComponent(id)}`, { schema: bootstrapSessionSchema, ...(signal ? { signal } : {}) }); }
+  floor(id: string, signal?: AbortSignal) { return this.client.request(`/api/bootstrap/session/${encodeURIComponent(id)}/floor`, { schema: bootstrapFloorSchema, ...(signal ? { signal } : {}) }); }
   floorSnapshot(id: string) { return this.client.request(`/api/sessions/${encodeURIComponent(id)}/floor`, { schema: floorResponseSchema }); }
-  repositories() { return this.client.request("/api/account/github/repositories", { schema: repositoryOptionsResponseSchema }); }
+  repositories(signal?: AbortSignal) { return this.client.request("/api/account/github/repositories", { schema: repositoryOptionsResponseSchema, ...(signal ? { signal } : {}) }); }
   createSession(input: { title: string; objective: string | null; candidateName: string | null; repositoryId: string; accountInstallationId: string }) {
     return this.client.request("/api/sessions", { method: "POST", body: input, schema: sessionCreateResponseSchema });
   }
   events(id: string, runId: string, after = 0) {
     return this.client.request(`/api/sessions/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/events?after=${after}`, { schema: eventsResponseSchema });
   }
-  reviewContributions(id: string, status: "active" | "rolled_back" = "active") {
-    return this.client.request(`/api/sessions/${encodeURIComponent(id)}/review/contributions?status=${status}&limit=100`, { schema: reviewContributionsSchema });
+  reviewContributions(id: string, status: "active" | "rolled_back" = "active", signal?: AbortSignal) {
+    return this.client.request(`/api/sessions/${encodeURIComponent(id)}/review/contributions?status=${status}&limit=100`, { schema: reviewContributionsSchema, ...(signal ? { signal } : {}) });
   }
-  reviewContribution(id: string, runId: string) {
-    return this.client.request(`/api/sessions/${encodeURIComponent(id)}/review/contributions/${encodeURIComponent(runId)}`, { schema: reviewContributionResponseSchema });
+  reviewContribution(id: string, runId: string, signal?: AbortSignal) {
+    return this.client.request(`/api/sessions/${encodeURIComponent(id)}/review/contributions/${encodeURIComponent(runId)}`, { schema: reviewContributionResponseSchema, ...(signal ? { signal } : {}) });
   }
-  credentials() { return this.client.request("/api/account/credentials", { schema: credentialsResponseSchema }); }
+  credentials(signal?: AbortSignal) { return this.client.request("/api/account/credentials", { schema: credentialsResponseSchema, ...(signal ? { signal } : {}) }); }
   connectCredential(provider: string, body: Record<string, string>) { return this.client.request(`/api/account/credentials/${encodeURIComponent(provider)}`, { method: "PUT", body, schema: credentialResponseSchema }); }
   disconnectCredential(provider: string, kind: string) { return this.client.request(`/api/account/credentials/${encodeURIComponent(provider)}?kind=${encodeURIComponent(kind)}`, { method: "DELETE", schema: recordResponseSchema }); }
   saveOnboardingProfile(input: { firstName: string; lastName: string; githubHandle: string }) {
@@ -59,7 +59,7 @@ export class OpenFloorActions {
     return this.client.request("/api/account/onboarding", { method: "POST", form, schema: onboardingCompleteResponseSchema });
   }
 
-  get(path: string) { return this.client.request(path, { schema: recordResponseSchema }); }
+  get(path: string, signal?: AbortSignal) { return this.client.request(path, { schema: recordResponseSchema, ...(signal ? { signal } : {}) }); }
   async text(path: string): Promise<string> {
     const response = await this.client.request<Response>(path, { raw: true });
     return sanitizeTerminal(await response.text());
