@@ -15,14 +15,21 @@ import { PresenceClient, type ConnectionStatus, type PresenceEvent, type TypingD
 import { sanitizeTerminal } from "./sanitize.js";
 import { credentialBody, credentialLabel, PROVIDER_CREDENTIAL_KINDS, PROVIDER_LABELS, PROVIDER_MODELS, PROVIDERS, type Provider } from "./providers.js";
 import { EditableInput } from "./tui-input.js";
+import { HistoryBuffer } from "./history.js";
+import { errorMessage, PageFrame, ChoiceList } from "./tui-shared.js";
+import { SessionActionsPage, ConfirmSessionRemoval, type SessionAction } from "./tui-sessions.js";
 import { requireCleanWorkspace, synchronizeWorkspace, type LocalWorkspace } from "./workspace.js";
 
 const exec = promisify(execFile);
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 type SessionPage = "floor" | "overview" | "review" | "settings" | "help";
-type Page = "sessions" | "create-session" | "bind-workspace" | "create-agent" | "credentials" | "cli-settings" | "cli-help" | SessionPage;
+type Page = "sessions" | "create-session" | "bind-workspace" | "create-agent" | "credentials" | "cli-settings" | "cli-help" | "session-actions" | "confirm-removal" | SessionPage;
 type FloorPane = "chat" | "drafts" | "agents" | "queue";
 type FloorDetail = { pane: FloorPane; index: number };
 type LocalSync = "none" | "syncing" | "live" | "paused" | "mismatch";
+type NoticeTone = "info" | "success" | "warn" | "error";
+type Notice = { text: string; tone: NoticeTone };
+type Busy = { label: string; startedAt: number };
 
 export type TuiProps = { actions: OpenFloorActions; client: ApiClient; baseUrl: string; initialSessionId?: string; workspace?: LocalWorkspace; logout?: () => Promise<void>; runCommand?: (line: string, sessionId: string | null, baseUrl: string) => Promise<void> };
 
@@ -42,7 +49,16 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   const [pagePanelFocused, setPagePanelFocused] = useState(false);
   const [credentialsReturn, setCredentialsReturn] = useState<"sessions" | "floor">("sessions");
   const [workspaceStartupResolved, setWorkspaceStartupResolved] = useState(!workspace || !initialSessionId);
-  const [notice, setNotice] = useState<string | null>(workspace ? `Local workspace: ${workspace.repositoryFullName}` : null);
+  const [notice, setNotice] = useState<Notice | null>(workspace ? { text: `Local workspace: ${workspace.repositoryFullName}`, tone: "info" } : null);
+  const [busy, setBusy] = useState<Busy | null>(null);
+  const [spinnerFrame, setSpinnerFrame] = useState(0);
+  const [busyElapsedSeconds, setBusyElapsedSeconds] = useState(0);
+  const [exitArmed, setExitArmed] = useState(false);
+  const [sessionActionTarget, setSessionActionTarget] = useState<{ session: SessionSummary; back: Page } | null>(null);
+  const [removal, setRemoval] = useState<{ session: SessionSummary; mode: "delete" | "leave"; back: Page } | null>(null);
+  const [homeHistory] = useState(() => new HistoryBuffer());
+  const [sessionHistory] = useState(() => new HistoryBuffer());
+  const exitTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [connection, setConnection] = useState<ConnectionStatus>("closed");
   const [localSync, setLocalSync] = useState<LocalSync>("none");
   const [workspaceSyncEnabled, setWorkspaceSyncEnabled] = useState(Boolean(workspace && initialSessionId));
@@ -51,7 +67,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   const [drafts, setDrafts] = useState<TypingDraft[]>([]);
   const [activities, setActivities] = useState<Record<string, Array<{ sequence: number; kind: string; detail: string }>>>({});
   const [floorFocus, setFloorFocus] = useState<"prompt" | FloorPane>("prompt");
-  const [paneRows, setPaneRows] = useState<Record<FloorPane, number>>({ chat: 0, drafts: 0, agents: 0, queue: 0 });
+  const [paneRows, setPaneRows] = useState<Record<FloorPane, number>>({ chat: -1, drafts: -1, agents: -1, queue: -1 });
   const [floorDetail, setFloorDetail] = useState<FloorDetail | null>(null);
   const [syncAttempt, setSyncAttempt] = useState(0);
   const startupHandled = useRef(false);
@@ -59,6 +75,31 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   const syncedCandidate = useRef<string | null>(null);
   const syncQueue = useRef<Promise<unknown>>(Promise.resolve());
   const queryClient = useQueryClient();
+
+  const notify = (text: string, tone: NoticeTone = "info") => setNotice({ text, tone });
+  const withBusy = async <T,>(label: string, fn: () => Promise<T>): Promise<T> => {
+    setBusy({ label, startedAt: Date.now() });
+    try { return await fn(); } finally { setBusy(null); }
+  };
+
+  useEffect(() => {
+    if (!notice) return;
+    const timeout = notice.tone === "error" || notice.tone === "warn" ? 20_000 : 6_000;
+    const timer = setTimeout(() => setNotice(null), timeout);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  useEffect(() => {
+    if (!busy) return;
+    const startedAt = busy.startedAt;
+    const timer = setInterval(() => {
+      setSpinnerFrame((value) => (value + 1) % SPINNER_FRAMES.length);
+      setBusyElapsedSeconds(Math.max(0, Math.round((Date.now() - startedAt) / 1_000)));
+    }, 120);
+    return () => clearInterval(timer);
+  }, [busy]);
+
+  useEffect(() => () => { if (exitTimer.current) clearTimeout(exitTimer.current); }, []);
 
   const homeQuery = useQuery({ queryKey: ["home"], queryFn: ({ signal }) => actions.home(signal) });
   const sessionQuery = useQuery({ queryKey: ["session", sessionId], queryFn: ({ signal }) => actions.session(sessionId!, signal), enabled: Boolean(sessionId && workspaceStartupResolved) });
@@ -98,7 +139,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
       else if (event.type === "floor.changed") void queryClient.invalidateQueries({ queryKey: ["floor", sessionId] });
       else if (event.type === "members.changed" || event.type === "session.changed" || event.type === "session.locked") void queryClient.invalidateQueries({ queryKey: ["session", sessionId] });
       else if (event.type === "session.ended") {
-        setNotice(`Session ended: ${event.reason}`);
+        notify(`Session ended: ${event.reason}`, "warn");
         void queryClient.invalidateQueries({ queryKey: ["home"] });
         if (workspace && boundSessionId === sessionId) {
           void unbindWorkspaceSession(workspace.root);
@@ -107,8 +148,8 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
       }
       else if (event.type === "run.activity") setActivities((current) => appendActivity(current, event.runId, event.events));
     });
-    presence.on("close", ({ code, reason }) => { if (code === 4001 || code === 4005) { setNotice(reason || "Membership ended"); setSessionId(null); setWorkspaceSyncEnabled(false); setBoundSessionId(null); setPage(workspace ? "create-session" : "sessions"); if (workspace) void unbindWorkspaceSession(workspace.root); void queryClient.invalidateQueries({ queryKey: ["home"] }); } });
-    void presence.connect().catch((error) => setNotice(error instanceof Error ? error.message : String(error)));
+    presence.on("close", ({ code, reason }) => { if (code === 4001 || code === 4005) { notify(reason || "Membership ended", "warn"); setSessionId(null); setWorkspaceSyncEnabled(false); setBoundSessionId(null); setPage(workspace ? "create-session" : "sessions"); if (workspace) void unbindWorkspaceSession(workspace.root); void queryClient.invalidateQueries({ queryKey: ["home"] }); } });
+    void presence.connect().catch((error) => notify(errorMessage(error), "error"));
     (globalThis as Record<string, unknown>).__openfloorPresence = presence;
     return () => { presence.sendDraft("", false); presence.close(); delete (globalThis as Record<string, unknown>).__openfloorPresence; };
   }, [boundSessionId, client, queryClient, sessionId, workspace, workspaceStartupResolved]);
@@ -131,16 +172,16 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   useEffect(() => {
     if (!workspace || !workspaceSyncEnabled || !sessionId || !floor || !candidateBranch || !candidateSha) return;
     if (repositoryName.toLowerCase() !== workspace.repositoryFullName.toLowerCase()) return;
-    if (repositoryStatus !== "ready") { void Promise.resolve().then(() => { setLocalSync("paused"); setNotice(`Repository is ${repositoryStatus}; local sync paused.`); }); return; }
+    if (repositoryStatus !== "ready") { void Promise.resolve().then(() => { setLocalSync("paused"); notify(`Repository is ${repositoryStatus}; local sync paused.`, "warn"); }); return; }
     const key = `${sessionId}:${candidateBranch}:${candidateSha}`;
     if (syncedCandidate.current === key) return;
     syncedCandidate.current = key;
     syncQueue.current = syncQueue.current.then(() => { setLocalSync("syncing"); return synchronizeWorkspace(workspace, candidateBranch, candidateSha); }).then((result) => {
       setLocalSync("live");
-      setNotice(`Local workspace updated on ${result.branch} at ${result.sha.slice(0, 12)}.`);
+      notify(`Local workspace updated on ${result.branch} at ${result.sha.slice(0, 12)}.`, "success");
     }, (reason) => {
       setLocalSync("paused");
-      setNotice(reason instanceof Error ? reason.message : String(reason));
+      notify(errorMessage(reason), "warn");
     });
   }, [candidateBranch, candidateSha, floor, repositoryName, repositoryStatus, sessionId, syncAttempt, workspace, workspaceSyncEnabled]);
 
@@ -157,7 +198,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
     void unbindWorkspaceSession(workspace.root);
     void Promise.resolve().then(() => {
       setWorkspaceSyncEnabled(false); setBoundSessionId(null); setSessionId(null); setPage("create-session");
-      setNotice("Local session binding removed because its repository no longer matches this checkout.");
+      notify("Local session binding removed because its repository no longer matches this checkout.", "warn");
     });
   }, [floor, repositoryName, sessionId, workspace, workspaceSyncEnabled]);
 
@@ -170,7 +211,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
       setBoundSessionId(null);
       setSessionId(null);
       setPage("create-session");
-      setNotice("Local session binding removed because session is no longer accessible.");
+      notify("Local session binding removed because session is no longer accessible.", "warn");
     });
   }, [floorQuery.error, sessionQuery.error, workspace, workspaceSyncEnabled]);
 
@@ -188,14 +229,14 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
     setWorkspaceSyncEnabled(true);
     setBoundSessionId(sessionId);
     setSyncAttempt((value) => value + 1);
-    setNotice(`Local sync enabled for ${workspace.repositoryFullName}.`);
+    notify(`Local sync enabled for ${workspace.repositoryFullName}.`, "success");
     setPage("floor");
   };
   const retryWorkspaceSync = () => {
-    if (!workspace) { setNotice("No local GitHub workspace detected."); return; }
+    if (!workspace) { notify("No local GitHub workspace detected.", "warn"); return; }
     if (!workspaceSyncEnabled) {
       if (repositoryName.toLowerCase() === workspace.repositoryFullName.toLowerCase() && candidateBranch && candidateSha && repositoryStatus === "ready") setPage("bind-workspace");
-      else setNotice("Local workspace does not match a ready candidate in this session.");
+      else notify("Local workspace does not match a ready candidate in this session.", "warn");
       return;
     }
     syncedCandidate.current = null;
@@ -203,19 +244,49 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   };
   const goSessions = (refresh = true) => { setSessionId(null); setPage("sessions"); setConnection("closed"); setOnline(new Set()); setDrafts([]); setLocalSync("none"); setFloorFocus("prompt"); setFloorDetail(null); setHomeCommandActive(false); setPagePanelFocused(false); if (refresh) void homeQuery.refetch(); };
   const refreshSession = () => { void sessionQuery.refetch(); void floorQuery.refetch(); void homeQuery.refetch(); };
+  const runSessionAction = async (target: SessionSummary, action: Exclude<SessionAction, "cancel">, back: Page) => {
+    if (action === "archive" || action === "unarchive") {
+      try {
+        await withBusy(action === "archive" ? "Archiving session" : "Unarchiving session", () => actions.post(`/api/sessions/${target.id}/${action}`));
+        notify(`Session ${action === "archive" ? "archived" : "unarchived"}.`, "success");
+        void homeQuery.refetch();
+        if (sessionId === target.id) refreshSession();
+      } catch (reason) { notify(errorMessage(reason), "error"); }
+      setPage(back);
+      return;
+    }
+    setRemoval({ session: target, mode: action, back });
+    setPage("confirm-removal");
+  };
+  const handleSessionRemoved = (warning?: string) => {
+    if (!removal) return;
+    const removedId = removal.session.id;
+    setRemoval(null);
+    if (workspace && boundSessionId === removedId) void unbindWorkspaceSession(workspace.root);
+    if (sessionId === removedId || boundSessionId === removedId) void updateConfig({ currentSessionId: undefined });
+    if (sessionId === removedId) { setSessionId(null); setWorkspaceSyncEnabled(false); setBoundSessionId(null); setConnection("closed"); setOnline(new Set()); setDrafts([]); setLocalSync("none"); }
+    notify(warning ?? (removal.mode === "delete" ? "Session deleted." : "Left session."), warning ? "warn" : "success");
+    void homeQuery.refetch();
+    setPage("sessions");
+  };
   const runBackground = async (line: string) => {
-    try { await runCommand(line, sessionId, baseUrl); setNotice("Command completed in background."); refreshSession(); }
-    catch (reason) { setNotice(sanitizeTerminal(reason instanceof Error ? reason.message : String(reason)).slice(-240)); }
+    try { await withBusy(line, () => runCommand(line, sessionId, baseUrl)); notify("Command completed in background.", "success"); refreshSession(); }
+    catch (reason) { notify(errorMessage(reason), "error"); }
   };
   const executeHomeCommand = async (raw: string) => {
     const [command = "", ...rest] = raw.trim().slice(1).split(/\s+/); const argument = rest.join(" ").trim();
     if (command === "new") { setSessionId(null); setPage("create-session"); }
     else if (command === "settings") setPage("cli-settings");
     else if (command === "credentials") { setCredentialsReturn("sessions"); setPage("credentials"); }
-    else if (command === "account") { await open(`${baseUrl}/home/settings`); setNotice("Account settings opened in browser."); }
+    else if (command === "account") { await open(`${baseUrl}/home/settings`); notify("Account settings opened in browser."); }
     else if (command === "help") setPage("cli-help");
     else if (command === "sessions") setPage("sessions");
-    else if (command === "refresh") { await homeQuery.refetch(); setNotice("Sessions refreshed."); }
+    else if (command === "refresh") { await homeQuery.refetch(); notify("Sessions refreshed."); }
+    else if (command === "archive" || command === "unarchive" || command === "delete" || command === "leave") {
+      const target = sessions[homeSelection];
+      if (!target) throw new Error("Select a session first.");
+      await runSessionAction(target, command, "sessions");
+    }
     else if (command === "run") { if (!argument) throw new Error("Usage: /run <CLI subcommand>"); await runBackground(argument); }
     else if (command === "logout") { await logout(); exit(); }
     else if (command === "quit" || command === "exit") exit();
@@ -225,12 +296,20 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   useInput((input, key) => {
     const presence = (globalThis as Record<string, unknown>).__openfloorPresence as PresenceClient | undefined;
     presence?.noteInput();
+    if (key.ctrl && input === "c") {
+      if (exitArmed) { exit(); return; }
+      setExitArmed(true);
+      notify(busy ? `Press Ctrl+C again to exit. "${busy.label}" is still running; its outcome will be unknown if you exit now.` : "Press Ctrl+C again to exit. Remote runs keep running.", "warn");
+      if (exitTimer.current) clearTimeout(exitTimer.current);
+      exitTimer.current = setTimeout(() => setExitArmed(false), 2_000);
+      return;
+    }
     if (key.escape && page === "sessions" && homeQuery.isLoading) {
       void queryClient.cancelQueries({ queryKey: ["home"] });
       exit();
       return;
     }
-    if (["create-session", "bind-workspace", "create-agent", "credentials"].includes(page)) return;
+    if (["create-session", "bind-workspace", "create-agent", "credentials", "session-actions", "confirm-removal"].includes(page)) return;
     if (sessionId) {
       if (key.escape && sessionLoading) {
         if (homeQuery.isLoading && !homeQuery.data) void queryClient.cancelQueries({ queryKey: ["home"] });
@@ -240,7 +319,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
           exit();
           return;
         }
-        setNotice("Session loading stopped.");
+        notify("Session loading stopped.", "warn");
         goSessions(false);
         return;
       }
@@ -256,65 +335,69 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
         if (key.escape && pagePanelFocused && page !== "review" && page !== "settings") { setPagePanelFocused(false); return; }
         return;
       }
-      if (floorDetail) { if (key.escape) setFloorDetail(null); else if (input === "q") exit(); return; }
-      if (key.tab) { setFloorFocus((current) => current === "prompt" ? "chat" : current === "chat" ? "drafts" : current === "drafts" ? "agents" : current === "agents" ? "queue" : "prompt"); return; }
+      if (floorDetail) { if (key.escape) setFloorDetail(null); return; }
+      const focusCycle: Array<"prompt" | FloorPane> = ["prompt", "chat", "drafts", "agents", "queue"];
+      if (key.tab) { const offset = key.shift ? -1 : 1; setFloorFocus((current) => focusCycle[(focusCycle.indexOf(current) + offset + focusCycle.length) % focusCycle.length]!); return; }
       if (floorFocus === "prompt") return;
       const panes: FloorPane[] = ["chat", "drafts", "agents", "queue"];
       if (key.escape) { setFloorFocus("prompt"); return; }
       if (key.leftArrow || key.rightArrow) { const index = panes.indexOf(floorFocus); const offset = key.leftArrow ? -1 : 1; setFloorFocus(panes[(index + offset + panes.length) % panes.length]!); return; }
       const count = floorPaneCount(floorFocus, floor, drafts);
-      if (key.upArrow) setPaneRows((current) => ({ ...current, [floorFocus]: Math.max(0, current[floorFocus] - 1) }));
-      else if (key.downArrow) setPaneRows((current) => ({ ...current, [floorFocus]: Math.min(Math.max(0, count - 1), current[floorFocus] + 1) }));
+      const currentRow = effectivePaneRow(floorFocus, paneRows[floorFocus], count);
+      if (key.upArrow) setPaneRows((current) => ({ ...current, [floorFocus]: Math.max(0, currentRow - 1) }));
+      else if (key.downArrow) setPaneRows((current) => ({ ...current, [floorFocus]: Math.min(Math.max(0, count - 1), currentRow + 1) }));
       else if (key.return && count > 0) {
-        const index = Math.min(paneRows[floorFocus], count - 1);
-        if (floorFocus === "agents" && index === (floor?.agents.length ?? 0)) { setPage("create-agent"); setFloorFocus("prompt"); }
-        else setFloorDetail({ pane: floorFocus, index });
+        if (floorFocus === "agents" && currentRow === (floor?.agents.length ?? 0)) { setPage("create-agent"); setFloorFocus("prompt"); }
+        else setFloorDetail({ pane: floorFocus, index: currentRow });
       }
       else if (input === "r") refreshSession();
       else if (input === "?") setPage("help");
-      else if (input === "q") exit();
       return;
     }
     if (homeCommandActive) return;
     if (page !== "sessions") { if (key.escape) setPage("sessions"); return; }
-    if (input === "q") { exit(); return; }
     if (input === "?") { setPage("cli-help"); return; }
     if (input === "r") { void homeQuery.refetch(); return; }
     if (key.upArrow) setSelectedSession((value) => Math.max(0, value - 1));
     if (key.downArrow) setSelectedSession((value) => Math.min(Math.max(0, sessions.length - 1), value + 1));
     if (key.return && sessions[homeSelection]) void enterSession(sessions[homeSelection].id, sessions[homeSelection].id === boundSessionId);
     if (input === "n") { setPage("create-session"); return; }
-    if (input && input !== "/" && !key.ctrl && !key.meta) setNotice("Commands start with /. Press / to open commands.");
+    if (input === "a" && sessions[homeSelection]) { setSessionActionTarget({ session: sessions[homeSelection], back: "sessions" }); setPage("session-actions"); return; }
+    if (input && input !== "/" && !key.ctrl && !key.meta) notify("Commands start with /. Press / to open commands.");
   });
 
   if (width < 60) return <Box flexDirection="column"><Text bold color="red">Terminal too narrow ({width} columns)</Text><Text>Resize to at least 60 columns.</Text></Box>;
   if (homeQuery.isLoading && page === "sessions") return <LoadingView message="Loading openfloor…" escape="Esc stops and exits" />;
   if (homeQuery.error && page === "sessions") return <ErrorView error={homeQuery.error} />;
 
+  const setNoticeText = (text: string) => notify(text);
   return <Box flexDirection="column" width="100%">
-    <Header {...(homeQuery.data?.props.user ? { user: homeQuery.data.props.user } : sessionQuery.data?.props.user ? { user: sessionQuery.data.props.user } : {})} {...(sessionQuery.data?.props.session ? { session: sessionQuery.data.props.session } : {})} connection={connection} {...(workspace ? { workspace } : {})} localSync={effectiveLocalSync} />
-    {notice && <Text color={effectiveLocalSync === "paused" || effectiveLocalSync === "mismatch" ? "yellow" : "cyan"}>{notice}</Text>}
+    <Header {...(homeQuery.data?.props.user ? { user: homeQuery.data.props.user } : sessionQuery.data?.props.user ? { user: sessionQuery.data.props.user } : {})} {...(sessionQuery.data?.props.session ? { session: sessionQuery.data.props.session } : {})} connection={connection} {...(workspace ? { workspace } : {})} localSync={effectiveLocalSync} busy={busy} spinnerFrame={spinnerFrame} elapsedSeconds={busyElapsedSeconds} />
+    {notice && <Text color={noticeColor(notice.tone)}>{notice.text}</Text>}
     {page === "sessions" && <Home sessions={sessions} selected={homeSelection} {...(homeQuery.data?.props.usage ? { usage: homeQuery.data.props.usage } : {})} {...(workspace ? { workspace } : {})} />}
     {page === "cli-settings" && <CliSettings baseUrl={baseUrl} />}
     {page === "cli-help" && <HelpPage session={false} />}
-    {page === "credentials" && <CredentialsPage actions={actions} close={() => setPage(credentialsReturn)} setNotice={setNotice} />}
-    {page === "create-session" && <CreateSessionWizard actions={actions} baseUrl={baseUrl} close={goSessions} {...(workspace ? { workspace } : {})} onCreated={(id, ready, message) => { setNotice(message); void homeQuery.refetch(); if (ready) void enterSession(id, Boolean(workspace)); }} />}
+    {page === "credentials" && <CredentialsPage actions={actions} close={() => setPage(credentialsReturn)} setNotice={setNoticeText} />}
+    {page === "create-session" && <CreateSessionWizard actions={actions} baseUrl={baseUrl} close={goSessions} {...(workspace ? { workspace } : {})} onCreated={(id, ready, message) => { notify(message, ready ? "success" : "warn"); void homeQuery.refetch(); if (ready) void enterSession(id, Boolean(workspace)); }} />}
     {page === "bind-workspace" && workspace && floor && <BindWorkspaceConfirm workspace={workspace} repositoryName={repositoryName} branch={candidateBranch} sha={candidateSha} close={() => setPage("floor")} confirm={enableWorkspaceSync} />}
     {page === "bind-workspace" && (!workspace || !floor) && <PageFrame title="Local sync unavailable"><Text>No matching local GitHub workspace is available.</Text><Text dimColor>Esc returns to the floor.</Text></PageFrame>}
-    {page === "create-agent" && sessionId && <CreateAgentPage actions={actions} sessionId={sessionId} members={members} close={() => setPage("floor")} completed={() => { refreshSession(); setNotice("Agent created."); setPage("floor"); }} />}
+    {page === "create-agent" && sessionId && <CreateAgentPage actions={actions} sessionId={sessionId} members={members} close={() => setPage("floor")} completed={() => { refreshSession(); notify("Agent created.", "success"); setPage("floor"); }} />}
+    {page === "session-actions" && sessionActionTarget && <SessionActionsPage session={sessionActionTarget.session} close={() => setPage(sessionActionTarget.back)} onSelect={(action) => { if (action === "cancel") return; void runSessionAction(sessionActionTarget.session, action, sessionActionTarget.back); }} />}
+    {page === "confirm-removal" && removal && <ConfirmSessionRemoval session={removal.session} actions={actions} mode={removal.mode} close={() => setPage(removal.back)} onRemoved={handleSessionRemoved} />}
     {sessionId && isSessionPage(page) && (sessionLoadError
       ? <SessionLoadError error={sessionLoadError} />
       : floor ? <>
-      {page === "floor" ? floorDetail ? <FloorItemDetail detail={floorDetail} floor={floor} drafts={drafts} activities={activities} /> : <FloorDashboard width={width} floor={floor} online={online} drafts={drafts} activities={activities} focus={floorFocus} rows={paneRows} /> : <PageView page={page} floor={floor} members={members} owner={sessionQuery.data?.props.session.role === "owner"} online={online} skills={skillsQuery.data} mcp={mcpQuery.data} active={pagePanelFocused} focusPrompt={() => setPagePanelFocused(false)} actions={actions} sessionId={sessionId} refresh={refreshSession} setNotice={setNotice} {...(workspace ? { workspace } : {})} localSync={effectiveLocalSync} />}
-      <CommandBar key={page} page={page} sessionId={sessionId} actions={actions} {...((globalThis as Record<string, unknown>).__openfloorPresence ? { presence: (globalThis as Record<string, unknown>).__openfloorPresence as PresenceClient } : {})} focused={page === "floor" ? floorFocus === "prompt" && !floorDetail : !pagePanelFocused} navigate={(next) => { setPage(next); setFloorDetail(null); setFloorFocus("prompt"); setPagePanelFocused(false); }} openCredentials={() => { setCredentialsReturn("floor"); setPage("credentials"); }} goSessions={goSessions} refresh={refreshSession} retryWorkspaceSync={retryWorkspaceSync} runBackground={runBackground} logout={logout} setNotice={setNotice} />
+      {page === "floor" ? floorDetail ? <FloorItemDetail detail={floorDetail} floor={floor} drafts={drafts} activities={activities} /> : <FloorDashboard width={width} floor={floor} online={online} drafts={drafts} activities={activities} focus={floorFocus} rows={paneRows} /> : <PageView page={page} floor={floor} members={members} owner={sessionQuery.data?.props.session.role === "owner"} online={online} skills={skillsQuery.data} mcp={mcpQuery.data} active={pagePanelFocused} focusPrompt={() => setPagePanelFocused(false)} actions={actions} sessionId={sessionId} refresh={refreshSession} setNotice={setNoticeText} {...(workspace ? { workspace } : {})} localSync={effectiveLocalSync} />}
+      <CommandBar key={page} page={page} sessionId={sessionId} actions={actions} history={sessionHistory} {...((globalThis as Record<string, unknown>).__openfloorPresence ? { presence: (globalThis as Record<string, unknown>).__openfloorPresence as PresenceClient } : {})} focused={page === "floor" ? floorFocus === "prompt" && !floorDetail : !pagePanelFocused} navigate={(next) => { setPage(next); setFloorDetail(null); setFloorFocus("prompt"); setPagePanelFocused(false); }} openCredentials={() => { setCredentialsReturn("floor"); setPage("credentials"); }} goSessions={goSessions} refresh={refreshSession} retryWorkspaceSync={retryWorkspaceSync} runBackground={runBackground} sessionAction={(action) => { const target = sessionQuery.data?.props.session; if (!target) { notify("Session details are not loaded yet.", "warn"); return; } void runSessionAction(target, action, "floor"); }} logout={logout} setNotice={setNoticeText} exitApp={exit} />
     </> : <LoadingView message="Loading session floor…" escape={homeQuery.isLoading && !homeQuery.data ? "Esc stops and exits" : "Esc stops and returns to Sessions"} />)}
-    {isHomePage(page) && <HomeCommandBar active={homeCommandActive} setActive={setHomeCommandActive} page={page} submit={executeHomeCommand} setNotice={setNotice} />}
+    {isHomePage(page) && <HomeCommandBar active={homeCommandActive} setActive={setHomeCommandActive} page={page} submit={executeHomeCommand} setNotice={setNoticeText} history={homeHistory} exitApp={exit} />}
+    <Text dimColor>{hintFor(page, sessionId != null, floorFocus, pagePanelFocused)}</Text>
   </Box>;
 }
 
-function Header({ user, session, connection, workspace, localSync }: { user?: AppUser; session?: SessionSummary; connection: ConnectionStatus; workspace?: LocalWorkspace; localSync: LocalSync }) {
+function Header({ user, session, connection, workspace, localSync, busy, spinnerFrame, elapsedSeconds }: { user?: AppUser; session?: SessionSummary; connection: ConnectionStatus; workspace?: LocalWorkspace; localSync: LocalSync; busy: Busy | null; spinnerFrame: number; elapsedSeconds: number }) {
   const syncText = !workspace ? "" : localSync === "live" ? " · local live" : localSync === "syncing" ? " · syncing local" : localSync === "paused" ? " · local paused" : localSync === "mismatch" ? " · different repository" : "";
-  return <Box borderStyle="round" borderColor="cyan" paddingX={1} justifyContent="space-between"><Text bold color="cyan">openfloor</Text><Text>{user ? `Logged in as ${user.displayName || user.email} · ` : ""}{session ? `${session.title} · ` : ""}<Text color={connection === "live" ? "green" : connection === "quota-exhausted" ? "red" : "yellow"}>{connection}</Text><Text color={localSync === "live" ? "green" : "yellow"}>{syncText}</Text></Text></Box>;
+  return <Box borderStyle="round" borderColor="cyan" paddingX={1} justifyContent="space-between"><Text bold color="cyan">openfloor</Text><Text>{user ? `Logged in as ${user.displayName || user.email} · ` : ""}{session ? `${session.title} · ` : ""}<Text color={connection === "live" ? "green" : connection === "quota-exhausted" ? "red" : "yellow"}>{connection}</Text><Text color={localSync === "live" ? "green" : "yellow"}>{syncText}</Text>{busy && <Text color="cyan"> · {SPINNER_FRAMES[spinnerFrame]} {busy.label} · {elapsedSeconds}s</Text>}</Text></Box>;
 }
 
 function Home({ sessions, selected, usage, workspace }: { sessions: SessionSummary[]; selected: number; usage?: Usage; workspace?: LocalWorkspace }) {
@@ -327,11 +410,21 @@ function CliSettings({ baseUrl }: { baseUrl: string }) {
 }
 
 function HelpPage({ session }: { session: boolean }) {
-  return <PageFrame title="Help">{session ? <><Text>Type ordinary text to queue work; use /chat &lt;message&gt; for team chat.</Text><Text>/floor /overview /review /settings /sessions /credentials /sync /refresh /exit /quit</Text><Text>/invite /members /agents /assignments /routing /queue /files /runs /conflicts /skills /mcp</Text><Text>Tab changes panel · arrows navigate · Enter opens · Esc returns to prompt.</Text></> : <><Text>↑↓ select · Enter opens · n creates · / starts a command.</Text><Text>/new /settings /credentials /account /help /logout /refresh /exit /quit</Text><Text>Ctrl+K focuses commands · Esc closes command entry.</Text></>}<Text>Ctrl+C exits locally and never cancels remote runs.</Text></PageFrame>;
-}
-
-function PageFrame({ title, children }: { title: string; children: React.ReactNode }) {
-  return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} minHeight={22} width="100%"><Text bold color="cyan">{title}</Text>{children}</Box>;
+  return <PageFrame title="keyboard help">{session ? <>
+    <Text>Type ordinary text to queue work; use /chat &lt;message&gt; for team chat.</Text>
+    <Text>/floor /overview /review /settings /sessions /credentials /sync /refresh /exit /quit</Text>
+    <Text>/invite /members /agents /assignments /routing /queue /files /runs /conflicts /skills /mcp</Text>
+    <Text>/archive /unarchive /delete /leave manage this session's lifecycle</Text>
+    <Text>Tab · Shift+Tab: cycle panels · arrows: navigate and scroll · Enter: open · Esc: returns to prompt</Text>
+    <Text>Up/Down in the prompt bar recall command history when there are no suggestions showing</Text>
+  </> : <>
+    <Text>↑↓ select · Enter opens · n creates · a session actions (archive/delete/leave) · / starts a command</Text>
+    <Text>/new /archive /unarchive /delete /leave /settings /credentials /account /help /logout /refresh /exit /quit</Text>
+    <Text>Ctrl+K focuses commands · Up/Down recall command history · Esc closes command entry</Text>
+  </>}
+    <Text>Ctrl+A/E: start/end of line · Ctrl+U: clear to start · Ctrl+W / Option+Backspace: delete word</Text>
+    <Text>Ctrl+C twice within 2s, or Ctrl+D on an empty prompt, exits. Neither cancels a remote run.</Text>
+  </PageFrame>;
 }
 
 function UsageSummary({ usage }: { usage: Usage }) {
@@ -346,22 +439,44 @@ function FloorDashboard({ width, floor, online, drafts, activities, focus, rows 
   const horizontal = width >= 100;
   const messages = teamMessages(floor);
   const queue = orderedQueue(floor);
-  const chatPanel = <Panel title="Team chat" width="100%" active={focus === "chat"}>{messages.length ? messages.slice(-10).map((message, index) => <Text key={recordText(message, "id", String(index))} inverse={focus === "chat" && index === rows.chat}><Text bold color="cyan">{recordText(message, "authorName", "Member")}</Text>: {recordText(message, "text")}</Text>) : <Text dimColor>No public messages. Use /chat message.</Text>}{online.size > 0 && <Text dimColor>{online.size} online</Text>}</Panel>;
-  const draftsPanel = <Panel title="Live teammate prompts" width="100%" active={focus === "drafts"}>{drafts.length ? drafts.slice(-6).map((draft, index) => <Text key={draft.userId} inverse={focus === "drafts" && index === rows.drafts} color="yellow"><Text bold>{draft.displayName}</Text>: {draft.text.slice(0, 100)}</Text>) : <Text dimColor>No teammates drafting.</Text>}</Panel>;
+  const agentsRow = effectivePaneRow("agents", rows.agents, floor.agents.length + 1);
+  const chatRow = effectivePaneRow("chat", rows.chat, messages.length);
+  const chatSpan = paneWindow(messages.length, 10, chatRow);
+  const chatVisible = messages.slice(chatSpan.start, chatSpan.end);
+  const draftsRow = effectivePaneRow("drafts", rows.drafts, drafts.length);
+  const draftsSpan = paneWindow(drafts.length, 6, draftsRow);
+  const draftsVisible = drafts.slice(draftsSpan.start, draftsSpan.end);
+  const queueRow = effectivePaneRow("queue", rows.queue, queue.length);
+  const queueSpan = paneWindow(queue.length, 14, queueRow);
+  const queueVisible = queue.slice(queueSpan.start, queueSpan.end);
+  const chatPanel = <Panel title="Team chat" width="100%" active={focus === "chat"}>{chatVisible.length ? <>
+    {chatSpan.start > 0 && <Text dimColor>↑ {chatSpan.start} more above</Text>}
+    {chatVisible.map((message, index) => <Text key={recordText(message, "id", String(chatSpan.start + index))} inverse={focus === "chat" && chatSpan.start + index === chatRow}><Text bold color="cyan">{recordText(message, "authorName", "Member")}</Text>: {recordText(message, "text")}</Text>)}
+    {chatSpan.end < messages.length && <Text dimColor>↓ {messages.length - chatSpan.end} more below</Text>}
+  </> : <Text dimColor>No public messages. Use /chat message.</Text>}{online.size > 0 && <Text dimColor>{online.size} online</Text>}</Panel>;
+  const draftsPanel = <Panel title="Live teammate prompts" width="100%" active={focus === "drafts"}>{draftsVisible.length ? <>
+    {draftsSpan.start > 0 && <Text dimColor>↑ {draftsSpan.start} more above</Text>}
+    {draftsVisible.map((draft, index) => <Text key={draft.userId} inverse={focus === "drafts" && draftsSpan.start + index === draftsRow} color="yellow"><Text bold>{draft.displayName}</Text>: {draft.text.slice(0, 100)}</Text>)}
+    {draftsSpan.end < drafts.length && <Text dimColor>↓ {drafts.length - draftsSpan.end} more below</Text>}
+  </> : <Text dimColor>No teammates drafting.</Text>}</Panel>;
   return <Box flexDirection={horizontal ? "row" : "column"} minHeight={22}>
     {horizontal ? <Box flexDirection="column" width="28%">{chatPanel}{draftsPanel}</Box> : <>{chatPanel}{draftsPanel}</>}
-    <Panel title="Agent floor" width={horizontal ? "44%" : "100%"} active={focus === "agents"}>{floor.agents.map((agent, index) => { const run = floor.runs.filter((item) => item.agentId === agent.id).sort((left, right) => right.updatedAt - left.updatedAt)[0]; const live = run ? activities[run.id]?.at(-1) : undefined; const status = agent.pausedAt ? "paused" : run?.status ?? "idle"; return <Box key={agent.id} flexDirection="column" marginBottom={1}><Text inverse={focus === "agents" && index === rows.agents} bold color={statusColor(status)}>● {agent.name} <Text dimColor>{agent.provider}/{agent.model ?? "default"}</Text></Text><Text>{agent.role}: {agent.task}</Text><Text color={statusColor(status)}>{status}{live ? ` · ${live.detail}` : ""}</Text></Box>; })}<Text inverse={focus === "agents" && rows.agents === floor.agents.length} color="cyan">＋ Create agent</Text></Panel>
-    <Panel title="Prompt queue" width={horizontal ? "28%" : "100%"} active={focus === "queue"}>{queue.length ? queue.slice(0, 14).map((item, index) => <Box key={item.id} flexDirection="column" marginBottom={1}><Text inverse={focus === "queue" && index === rows.queue} color={statusColor(item.status)}>{String(item.position + 1).padStart(2)} · {item.status} · {item.agentName ?? "unassigned"}</Text><Text>{item.prompts.map((prompt) => prompt.text).join(" / ").slice(0, 100)}</Text></Box>) : <Text dimColor>Queue empty. Type a prompt below.</Text>}</Panel>
+    <Panel title="Agent floor" width={horizontal ? "44%" : "100%"} active={focus === "agents"}>{floor.agents.map((agent, index) => { const run = floor.runs.filter((item) => item.agentId === agent.id).sort((left, right) => right.updatedAt - left.updatedAt)[0]; const live = run ? activities[run.id]?.at(-1) : undefined; const status = agent.pausedAt ? "paused" : run?.status ?? "idle"; return <Box key={agent.id} flexDirection="column" marginBottom={1}><Text inverse={focus === "agents" && index === agentsRow} bold color={statusColor(status)}>● {agent.name} <Text dimColor>{agent.provider}/{agent.model ?? "default"}</Text></Text><Text>{agent.role}: {agent.task}</Text><Text color={statusColor(status)}>{status}{live ? ` · ${live.detail}` : ""}</Text></Box>; })}<Text inverse={focus === "agents" && agentsRow === floor.agents.length} color="cyan">＋ Create agent</Text></Panel>
+    <Panel title="Prompt queue" width={horizontal ? "28%" : "100%"} active={focus === "queue"}>{queueVisible.length ? <>
+      {queueSpan.start > 0 && <Text dimColor>↑ {queueSpan.start} more above</Text>}
+      {queueVisible.map((item, index) => <Box key={item.id} flexDirection="column" marginBottom={1}><Text inverse={focus === "queue" && queueSpan.start + index === queueRow} color={statusColor(item.status)}>{String(item.position + 1).padStart(2)} · {item.status} · {item.agentName ?? "unassigned"}</Text><Text>{item.prompts.map((prompt) => prompt.text).join(" / ").slice(0, 100)}</Text></Box>)}
+      {queueSpan.end < queue.length && <Text dimColor>↓ {queue.length - queueSpan.end} more below</Text>}
+    </> : <Text dimColor>Queue empty. Type a prompt below.</Text>}</Panel>
   </Box>;
 }
 
 function Panel({ title, width, active, children }: { title: string; width: number | `${number}%`; active: boolean; children: React.ReactNode }) { return <Box flexDirection="column" width={width} borderStyle={active ? "double" : "round"} borderColor={active ? "cyan" : "gray"} paddingX={1}><Text bold color="cyan">{active ? "› " : ""}{title}</Text>{children}</Box>; }
 
 function FloorItemDetail({ detail, floor, drafts, activities }: { detail: FloorDetail; floor: FloorSnapshot; drafts: TypingDraft[]; activities: Record<string, Array<{ sequence: number; kind: string; detail: string }>> }) {
-  if (detail.pane === "chat") { const message = teamMessages(floor).slice(-10)[detail.index]; return <Detail title="Team message"><Text bold>{recordText(message, "authorName", "Member")}</Text><Text>{recordText(message, "text")}</Text><Text dimColor>Esc returns to floor</Text></Detail>; }
-  if (detail.pane === "drafts") { const draft = drafts.slice(-6)[detail.index]; return <Detail title="Live teammate prompt"><Text bold>{draft?.displayName ?? "Teammate"}</Text><Text>{draft?.text ?? "Draft ended."}</Text><Text dimColor>Ephemeral · Esc returns to floor</Text></Detail>; }
+  if (detail.pane === "chat") { const message = teamMessages(floor)[detail.index]; return <Detail title="Team message"><Text bold>{recordText(message, "authorName", "Member")}</Text><Text>{recordText(message, "text")}</Text><Text dimColor>Esc returns to floor</Text></Detail>; }
+  if (detail.pane === "drafts") { const draft = drafts[detail.index]; return <Detail title="Live teammate prompt"><Text bold>{draft?.displayName ?? "Teammate"}</Text><Text>{draft?.text ?? "Draft ended."}</Text><Text dimColor>Ephemeral · Esc returns to floor</Text></Detail>; }
   if (detail.pane === "agents") { const agent = floor.agents[detail.index]; if (!agent) return <Detail title="Agent">Agent no longer available.</Detail>; const run = floor.runs.filter((item) => item.agentId === agent.id).sort((left, right) => right.updatedAt - left.updatedAt)[0]; const live = run ? activities[run.id]?.at(-1) : undefined; return <Detail title={agent.name}><Text>{agent.role}: {agent.task}</Text><Text>Provider: {agent.provider}/{agent.model ?? "default"}</Text><Text>Owner: {agent.ownerName}</Text><Text>Status: {agent.pausedAt ? "paused" : run?.status ?? "idle"}</Text>{live && <Text>Latest: {live.detail}</Text>}<Text dimColor>ID {agent.id} · Esc returns to floor</Text></Detail>; }
-  const item = orderedQueue(floor).slice(0, 14)[detail.index]; if (!item) return <Detail title="Prompt">Prompt no longer available.</Detail>; return <Detail title={`Queue ${item.position + 1}`}><Text>Status: {item.status} · {item.agentName ?? "unassigned"}</Text>{item.prompts.map((prompt) => <Text key={prompt.id}><Text bold>{prompt.authorName}:</Text> {prompt.text}</Text>)}<Text dimColor>ID {item.id} · Esc returns to floor</Text></Detail>;
+  const item = orderedQueue(floor)[detail.index]; if (!item) return <Detail title="Prompt">Prompt no longer available.</Detail>; return <Detail title={`Queue ${item.position + 1}`}><Text>Status: {item.status} · {item.agentName ?? "unassigned"}</Text>{item.prompts.map((prompt) => <Text key={prompt.id}><Text bold>{prompt.authorName}:</Text> {prompt.text}</Text>)}<Text dimColor>ID {item.id} · Esc returns to floor</Text></Detail>;
 }
 
 function Detail({ title, children }: { title: string; children: React.ReactNode }) { return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} minHeight={22}><Text bold color="cyan">{title}</Text>{children}</Box>; }
@@ -455,13 +570,14 @@ function SessionSettingsPage({ actions, sessionId, floor, owner, skills, mcp, ac
   </Box>;
 }
 
-function CommandBar({ page, sessionId, actions, presence, focused, navigate, openCredentials, goSessions, refresh, retryWorkspaceSync, runBackground, logout, setNotice }: { page: SessionPage; sessionId: string; actions: OpenFloorActions; presence?: PresenceClient; focused: boolean; navigate: (page: SessionPage) => void; openCredentials: () => void; goSessions: () => void; refresh: () => void; retryWorkspaceSync: () => void; runBackground: (line: string) => Promise<void>; logout: () => Promise<void>; setNotice: (message: string) => void }) {
+function CommandBar({ page, sessionId, actions, presence, focused, navigate, openCredentials, goSessions, refresh, retryWorkspaceSync, runBackground, sessionAction, logout, setNotice, history, exitApp }: { page: SessionPage; sessionId: string; actions: OpenFloorActions; presence?: PresenceClient; focused: boolean; navigate: (page: SessionPage) => void; openCredentials: () => void; goSessions: () => void; refresh: () => void; retryWorkspaceSync: () => void; runBackground: (line: string) => Promise<void>; sessionAction: (action: Exclude<SessionAction, "cancel">) => void; logout: () => Promise<void>; setNotice: (message: string) => void; history: HistoryBuffer; exitApp: () => void }) {
   const { exit } = useApp(); const [value, setValue] = useState(""); const [selected, setSelected] = useState(0); const [inputKey, setInputKey] = useState(0);
   const suggestions = value.startsWith("/") ? commandSuggestions(SESSION_COMMANDS, value) : [];
   const activeSelection = Math.min(selected, Math.max(0, suggestions.length - 1));
   const reset = () => { setValue(""); setSelected(0); setInputKey((current) => current + 1); presence?.sendDraft("", false); };
   const submit = async (raw: string) => {
     const text = raw.trim(); if (!text) return;
+    history.push(text);
     if (text.startsWith("/")) {
       const [command = "", ...rest] = text.slice(1).split(/\s+/); const argument = rest.join(" ").trim();
       const exact = SESSION_COMMANDS.some((entry) => entry.name === `/${command}`) || command === "run";
@@ -473,6 +589,7 @@ function CommandBar({ page, sessionId, actions, presence, focused, navigate, ope
       else if (command === "sync") retryWorkspaceSync();
       else if (command === "commands" || command === "help") navigate("help");
       else if (command === "credentials") openCredentials();
+      else if (command === "archive" || command === "unarchive" || command === "delete" || command === "leave") sessionAction(command);
       else if (command === "account") { await open(`${actions.client.baseUrl}/home/settings`); setNotice("Account settings opened in browser."); }
       else if (command === "logout") { await logout(); exit(); }
       else if (command === "quit") exit();
@@ -490,20 +607,21 @@ function CommandBar({ page, sessionId, actions, presence, focused, navigate, ope
     }
     await actions.post(`/api/sessions/${sessionId}/queue`, { prompt: text, agentId: null }); setNotice("Prompt added to queue."); refresh(); reset();
   };
-  return <Box flexDirection="column">{focused && suggestions.length > 0 && <CommandSuggestions commands={suggestions} selected={activeSelection} />}<Box borderStyle={focused ? "double" : "round"} borderColor="cyan" paddingX={1}><Text color="cyan">{focused ? `${page} › ` : `${page} › `}</Text><EditableInput key={inputKey} value={value} active={focused} placeholder="Prompt agents or type /help" onUp={() => setSelected((current) => Math.max(0, current - 1))} onDown={() => setSelected((current) => Math.min(Math.max(0, suggestions.length - 1), current + 1))} onEscape={reset} onChange={(next) => { setValue(next); setSelected(0); if (next.startsWith("/")) presence?.sendDraft("", false); else presence?.sendDraft(next); }} onSubmit={(next) => { void submit(next).catch((reason) => setNotice(errorMessage(reason))); }} /></Box><Text dimColor>Tab: change panel · Esc: prompt · /: commands</Text></Box>;
+  useInput((input, key) => { if (key.ctrl && input === "d" && !value) exitApp(); }, { isActive: focused });
+  return <Box flexDirection="column">{focused && suggestions.length > 0 && <CommandSuggestions commands={suggestions} selected={activeSelection} />}<Box borderStyle={focused ? "double" : "round"} borderColor="cyan" paddingX={1}><Text color="cyan">{focused ? `${page} › ` : `${page} › `}</Text><EditableInput key={inputKey} value={value} active={focused} placeholder="Prompt agents or type /help" onUp={() => { if (suggestions.length > 0) { setSelected((current) => Math.max(0, current - 1)); return; } const previous = history.previous(value); if (previous != null) { setValue(previous); setInputKey((current) => current + 1); } }} onDown={() => { if (suggestions.length > 0) { setSelected((current) => Math.min(Math.max(0, suggestions.length - 1), current + 1)); return; } const next = history.next(); if (next != null) { setValue(next); setInputKey((current) => current + 1); } }} onEscape={reset} onChange={(next) => { setValue(next); setSelected(0); if (next.startsWith("/")) presence?.sendDraft("", false); else presence?.sendDraft(next); }} onSubmit={(next) => { void submit(next).catch((reason) => setNotice(errorMessage(reason))); }} /></Box></Box>;
 }
 
 type CommandSpec = { name: string; description: string };
 const HOME_COMMANDS: readonly CommandSpec[] = [
-  { name: "/new", description: "create session" }, { name: "/settings", description: "CLI settings" }, { name: "/credentials", description: "AI credentials" }, { name: "/account", description: "browser account settings" }, { name: "/help", description: "keyboard help" }, { name: "/logout", description: "remove CLI login" }, { name: "/sessions", description: "session list" }, { name: "/refresh", description: "reload sessions" }, { name: "/exit", description: "quit" }, { name: "/quit", description: "quit" },
+  { name: "/new", description: "create session" }, { name: "/archive", description: "archive selected session" }, { name: "/unarchive", description: "unarchive selected session" }, { name: "/delete", description: "delete selected session (owner)" }, { name: "/leave", description: "leave selected session" }, { name: "/settings", description: "CLI settings" }, { name: "/credentials", description: "AI credentials" }, { name: "/account", description: "browser account settings" }, { name: "/help", description: "keyboard help" }, { name: "/logout", description: "remove CLI login" }, { name: "/sessions", description: "session list" }, { name: "/refresh", description: "reload sessions" }, { name: "/exit", description: "quit" }, { name: "/quit", description: "quit" },
 ];
 const SESSION_COMMANDS: readonly CommandSpec[] = [
-  { name: "/floor", description: "agent floor" }, { name: "/overview", description: "session overview" }, { name: "/review", description: "changes by file or prompt" }, { name: "/settings", description: "session settings" }, { name: "/sessions", description: "all sessions" }, { name: "/chat", description: "send or manage chat" }, { name: "/queue", description: "queue prompt or manage queue" }, { name: "/agents", description: "manage agents" }, { name: "/assignments", description: "manage assignments" }, { name: "/routing", description: "routing commands" }, { name: "/invite", description: "invite commands" }, { name: "/members", description: "member commands" }, { name: "/files", description: "file commands" }, { name: "/runs", description: "run commands" }, { name: "/conflicts", description: "conflict commands" }, { name: "/skills", description: "skill commands" }, { name: "/mcp", description: "MCP commands" }, { name: "/credentials", description: "AI credentials" }, { name: "/account", description: "browser account settings" }, { name: "/refresh", description: "reload floor" }, { name: "/sync", description: "retry local sync" }, { name: "/help", description: "keyboard help" }, { name: "/logout", description: "remove CLI login" }, { name: "/exit", description: "back" }, { name: "/quit", description: "quit" },
+  { name: "/floor", description: "agent floor" }, { name: "/overview", description: "session overview" }, { name: "/review", description: "changes by file or prompt" }, { name: "/settings", description: "session settings" }, { name: "/sessions", description: "all sessions" }, { name: "/chat", description: "send or manage chat" }, { name: "/queue", description: "queue prompt or manage queue" }, { name: "/agents", description: "manage agents" }, { name: "/assignments", description: "manage assignments" }, { name: "/routing", description: "routing commands" }, { name: "/invite", description: "invite commands" }, { name: "/members", description: "member commands" }, { name: "/files", description: "file commands" }, { name: "/runs", description: "run commands" }, { name: "/conflicts", description: "conflict commands" }, { name: "/skills", description: "skill commands" }, { name: "/mcp", description: "MCP commands" }, { name: "/credentials", description: "AI credentials" }, { name: "/account", description: "browser account settings" }, { name: "/archive", description: "archive this session" }, { name: "/unarchive", description: "unarchive this session" }, { name: "/delete", description: "delete this session (owner)" }, { name: "/leave", description: "leave this session" }, { name: "/refresh", description: "reload floor" }, { name: "/sync", description: "retry local sync" }, { name: "/help", description: "keyboard help" }, { name: "/logout", description: "remove CLI login" }, { name: "/exit", description: "back" }, { name: "/quit", description: "quit" },
 ];
 const BACKGROUND_GROUPS = ["invite", "members", "agents", "assignments", "routing", "queue", "chat", "files", "runs", "conflicts", "skills", "mcp", "review"];
 const BACKGROUND_DEFAULTS: Record<string, string | undefined> = { invite: "show", members: "list", agents: "list", routing: "show", queue: "list", chat: "list", files: "list", runs: "list", conflicts: "list", skills: "list", mcp: "list", review: "status" };
 
-function HomeCommandBar({ active, setActive, page, submit, setNotice }: { active: boolean; setActive: (active: boolean) => void; page: "sessions" | "cli-settings" | "cli-help"; submit: (value: string) => Promise<void>; setNotice: (message: string) => void }) {
+function HomeCommandBar({ active, setActive, page, submit, setNotice, history, exitApp }: { active: boolean; setActive: (active: boolean) => void; page: "sessions" | "cli-settings" | "cli-help"; submit: (value: string) => Promise<void>; setNotice: (message: string) => void; history: HistoryBuffer; exitApp: () => void }) {
   const [value, setValue] = useState(""); const [selected, setSelected] = useState(0); const [inputKey, setInputKey] = useState(0);
   const suggestions = commandSuggestions(HOME_COMMANDS, value || "/");
   const activeSelection = Math.min(selected, Math.max(0, suggestions.length - 1));
@@ -513,17 +631,19 @@ function HomeCommandBar({ active, setActive, page, submit, setNotice }: { active
       if (input === "/" || (key.ctrl && input === "k")) { setValue("/"); setSelected(0); setInputKey((current) => current + 1); setActive(true); }
       return;
     }
+    if (key.ctrl && input === "d" && !value) exitApp();
   });
   const execute = async (raw: string) => {
     const trimmed = raw.trim();
     const token = trimmed.split(/\s/, 1)[0] ?? ""; const exact = HOME_COMMANDS.some((entry) => entry.name === token) || token === "/run";
     if (!exact && suggestions[activeSelection]) { setValue(suggestions[activeSelection].name); setInputKey((current) => current + 1); return; }
     if (!trimmed.startsWith("/")) { setNotice("Commands start with /. Press / to open commands."); return; }
+    history.push(trimmed);
     try { await submit(trimmed); reset(); }
     catch (reason) { setNotice(sanitizeTerminal(reason instanceof Error ? reason.message : String(reason)).slice(-240)); }
   };
   const label = page === "sessions" ? "sessions" : page === "cli-settings" ? "settings" : "help";
-  return <Box flexDirection="column">{active && suggestions.length > 0 && <CommandSuggestions commands={suggestions} selected={activeSelection} />}<Box borderStyle={active ? "double" : "round"} borderColor="cyan" paddingX={1}><Text color="cyan">{label} › </Text><EditableInput key={inputKey} value={value} active={active} placeholder="Type / for commands" onEscape={reset} onUp={() => setSelected((current) => Math.max(0, current - 1))} onDown={() => setSelected((current) => Math.min(Math.max(0, suggestions.length - 1), current + 1))} onChange={(next) => { setValue(next); setSelected(0); }} onSubmit={(raw) => { void execute(raw); }} /></Box></Box>;
+  return <Box flexDirection="column">{active && suggestions.length > 0 && <CommandSuggestions commands={suggestions} selected={activeSelection} />}<Box borderStyle={active ? "double" : "round"} borderColor="cyan" paddingX={1}><Text color="cyan">{label} › </Text><EditableInput key={inputKey} value={value} active={active} placeholder="Type / for commands" onEscape={reset} onUp={() => { if (suggestions.length > 0) { setSelected((current) => Math.max(0, current - 1)); return; } const previous = history.previous(value); if (previous != null) { setValue(previous); setInputKey((current) => current + 1); } }} onDown={() => { if (suggestions.length > 0) { setSelected((current) => Math.min(Math.max(0, suggestions.length - 1), current + 1)); return; } const next = history.next(); if (next != null) { setValue(next); setInputKey((current) => current + 1); } }} onChange={(next) => { setValue(next); setSelected(0); }} onSubmit={(raw) => { void execute(raw); }} /></Box></Box>;
 }
 
 function CommandSuggestions({ commands, selected }: { commands: readonly CommandSpec[]; selected: number }) {
@@ -601,8 +721,6 @@ function CredentialsPage({ actions, close, setNotice }: { actions: OpenFloorActi
   </PageFrame>;
 }
 
-function ChoiceList({ title, values, selected }: { title: string; values: readonly string[]; selected: number }) { return <><Text bold>{title}</Text>{values.map((value, index) => <Text key={value} inverse={index === selected}>{index === selected ? "›" : " "} {value}</Text>)}<Text dimColor>↑↓ select · Enter continue · Esc back</Text></>; }
-
 function BindWorkspaceConfirm({ workspace, repositoryName, branch, sha, close, confirm }: { workspace: LocalWorkspace; repositoryName: string; branch: string; sha: string; close: () => void; confirm: () => Promise<void> }) {
   const [working, setWorking] = useState(false); const [error, setError] = useState<string | null>(null);
   useInput((input, key) => { if (working) return; if (key.escape || input.toLowerCase() === "n") close(); else if (key.return || input.toLowerCase() === "y") { setWorking(true); setError(null); void confirm().then(close, (reason) => { setWorking(false); setError(reason instanceof Error ? reason.message : String(reason)); }); } });
@@ -637,7 +755,22 @@ function LoadingView({ message, escape }: { message: string; escape: string }) {
 function SessionLoadError({ error }: { error: unknown }) { return <Box flexDirection="column"><Text color="red" bold>Unable to load session floor</Text><Text>{errorMessage(error)}</Text><Text dimColor>Esc returns to Sessions · r retries</Text></Box>; }
 function ErrorView({ error }: { error: unknown }) { return <Box flexDirection="column"><Text color="red" bold>Unable to load openfloor</Text><Text>{sanitizeTerminal(error instanceof Error ? error.message : String(error))}</Text><Text dimColor>Run openfloor auth login or openfloor doctor.</Text></Box>; }
 function appendActivity(current: Record<string, Array<{ sequence: number; kind: string; detail: string }>>, runId: string, events: Array<{ sequence: number; kind: string; detail: string }>) { const all = [...(current[runId] ?? []), ...events].sort((left, right) => left.sequence - right.sequence); return { ...current, [runId]: all.filter((item, index) => index === 0 || item.sequence !== all[index - 1]!.sequence).slice(-100) }; }
-function floorPaneCount(pane: FloorPane, floor: FloorSnapshot | undefined, drafts: TypingDraft[]): number { if (!floor) return 0; if (pane === "chat") return Math.min(10, teamMessages(floor).length); if (pane === "drafts") return Math.min(6, drafts.length); if (pane === "agents") return floor.agents.length + 1; return Math.min(14, floor.queue.length); }
+function floorPaneCount(pane: FloorPane, floor: FloorSnapshot | undefined, drafts: TypingDraft[]): number { if (!floor) return 0; if (pane === "chat") return teamMessages(floor).length; if (pane === "drafts") return drafts.length; if (pane === "agents") return floor.agents.length + 1; return floor.queue.length; }
+/** Clamps a cursor-centered window of `size` items into [0, length). Pure. */
+export function paneWindow(length: number, size: number, cursor: number): { start: number; end: number } {
+  if (length <= 0) return { start: 0, end: 0 };
+  if (length <= size) return { start: 0, end: length };
+  let start = cursor - Math.floor(size / 2);
+  if (start < 0) start = 0;
+  if (start + size > length) start = length - size;
+  return { start, end: start + size };
+}
+/** Resolves a pane's stored cursor (-1 = never navigated) to an absolute index into its full list. Chat/drafts default to the newest item; agents/queue default to the first. */
+function effectivePaneRow(pane: FloorPane, raw: number, count: number): number {
+  if (count <= 0) return 0;
+  if (raw < 0) return pane === "chat" || pane === "drafts" ? count - 1 : 0;
+  return Math.min(Math.max(raw, 0), count - 1);
+}
 function recordText(value: unknown, key: string, fallback = ""): string { if (!value || typeof value !== "object" || !(key in value)) return fallback; const entry = (value as Record<string, unknown>)[key]; return typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean" ? String(entry) : fallback; }
 function recordArray(value: unknown, ...keys: string[]): Array<Record<string, unknown>> { if (!value || typeof value !== "object") return []; for (const key of keys) { const entry = (value as Record<string, unknown>)[key]; if (Array.isArray(entry)) return entry.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)); } return []; }
 function sessionGroup(session: SessionSummary): number { return session.endedAt != null ? 2 : session.archivedAt != null ? 1 : 0; }
@@ -645,8 +778,25 @@ function isSessionPage(page: Page): page is SessionPage { return ["floor", "over
 function isHomePage(page: Page): page is "sessions" | "cli-settings" | "cli-help" { return ["sessions", "cli-settings", "cli-help"].includes(page); }
 function statusColor(status: string): "green" | "yellow" | "red" | "cyan" | "white" { if (["completed", "integrated", "ready", "passed"].includes(status)) return "green"; if (["failed", "cancelled", "conflicted"].includes(status)) return "red"; if (["running", "publishing", "integrating"].includes(status)) return "cyan"; if (["paused", "queued", "pending", "awaiting_input"].includes(status)) return "yellow"; return "white"; }
 function capitalize(value: string): string { return `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`; }
-function errorMessage(reason: unknown): string { return sanitizeTerminal(reason instanceof Error ? reason.message : String(reason)).slice(-240); }
-function commandSuggestions(commands: readonly CommandSpec[], value: string): CommandSpec[] { const token = value.split(/\s/, 1)[0] || "/"; return commands.filter((command) => command.name.startsWith(token)); }
+function commandSuggestions(commands: readonly CommandSpec[], value: string): CommandSpec[] {
+  const token = (value.split(/\s/, 1)[0] || "/").toLowerCase();
+  if (token === "/") return [...commands];
+  const prefix = commands.filter((command) => command.name.toLowerCase().startsWith(token));
+  const needle = token.slice(1);
+  const fuzzy = commands.filter((command) => !prefix.includes(command) && needle && isSubsequence(needle, command.name.slice(1).toLowerCase()));
+  return [...prefix, ...fuzzy];
+}
+function isSubsequence(needle: string, haystack: string): boolean {
+  let index = 0;
+  for (const char of haystack) { if (char === needle[index]) index += 1; if (index === needle.length) return true; }
+  return needle.length === 0;
+}
+function noticeColor(tone: NoticeTone): "cyan" | "green" | "yellow" | "red" { return tone === "success" ? "green" : tone === "warn" ? "yellow" : tone === "error" ? "red" : "cyan"; }
+function hintFor(page: Page, hasSession: boolean, floorFocus: "prompt" | FloorPane, pagePanelFocused: boolean): string {
+  if (!hasSession) return page === "sessions" ? "↑↓ select · Enter open · n new · a session actions · / commands · Ctrl+C twice or Ctrl+D exits" : "Esc: back to Sessions";
+  if (page === "floor") return floorFocus === "prompt" ? "Tab: change panel · /: commands · Ctrl+C twice or Ctrl+D exits" : "Tab: change panel · arrows: move · Enter: open · Esc: prompt";
+  return pagePanelFocused ? "Esc: returns to command bar" : "Tab: focus this page · /exit: back to floor";
+}
 function teamMessages(floor: FloorSnapshot) { return floor.messages.filter((message) => !recordText(message, "recipientUserId")); }
 const TERMINAL_QUEUE_STATUSES = new Set(["completed", "failed", "cancelled", "canceled", "integrated", "rolled_back", "discarded", "answered"]);
 export function orderedQueue(floor: FloorSnapshot) { return [...floor.queue].sort((left, right) => Number(TERMINAL_QUEUE_STATUSES.has(left.status)) - Number(TERMINAL_QUEUE_STATUSES.has(right.status)) || left.position - right.position); }

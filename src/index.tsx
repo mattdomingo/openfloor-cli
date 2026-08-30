@@ -56,7 +56,7 @@ async function main(): Promise<void> {
       baseUrl: runtime.baseUrl,
       ...(workspace ? { workspace } : {}),
       ...(workspaceSession ? { initialSessionId: workspaceSession } : {}),
-    }), { exitOnCtrlC: true });
+    }), { exitOnCtrlC: false });
     await instance.waitUntilExit();
   } finally {
     cleanup(); process.off("SIGTERM", terminate);

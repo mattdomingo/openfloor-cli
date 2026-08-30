@@ -2,9 +2,10 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { render } from "ink-testing-library";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { orderedQueue, startTui } from "../src/tui.js";
+import { orderedQueue, paneWindow, startTui } from "../src/tui.js";
 import type { OpenFloorActions } from "../src/actions.js";
 import type { ApiClient } from "../src/client.js";
+import { OpenFloorError } from "../src/errors.js";
 
 const instances: Array<ReturnType<typeof render>> = [];
 afterEach(() => { for (const instance of instances.splice(0)) instance.unmount(); vi.unstubAllEnvs(); });
@@ -45,7 +46,7 @@ describe("TUI", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     instance.stdin.write("?");
     await new Promise((resolve) => setTimeout(resolve, 10));
-    expect(instance.lastFrame()).toContain("↑↓ select · Enter opens · n creates · / starts a command.");
+    expect(instance.lastFrame()).toContain("↑↓ select · Enter opens · n creates · a session actions");
   });
 
   it("uses inline slash suggestions instead of a home filter popup", async () => {
@@ -69,8 +70,8 @@ describe("TUI", () => {
     await waitForFrame(instance, "Sessions");
     instance.stdin.write("\u000b");
     await waitForFrame(instance, "/new");
-    instance.stdin.write("\u001b[B");
-    await pause();
+    instance.stdin.write("set");
+    await waitForFrame(instance, "/settings");
     instance.stdin.write("\r");
     await pause();
     instance.stdin.write("\r");
@@ -300,7 +301,7 @@ describe("TUI", () => {
     instance.stdin.write("/overview"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Members");
     instance.stdin.write("/exit"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Prompt queue");
     instance.stdin.write("/exit"); await pause(); instance.stdin.write("\r"); await waitForFrame(instance, "Sessions");
-    instance.stdin.write("?"); await waitForFrame(instance, "Ctrl+C exits locally");
+    instance.stdin.write("?"); await waitForFrame(instance, "Neither cancels a remote run.");
     expect(instance.lastFrame()).not.toContain("/repository");
   });
 
@@ -412,6 +413,14 @@ describe("TUI", () => {
     expect(orderedQueue({ ...floor, queue: values }).map((item) => item.id)).toEqual(["queued", "live", "done", "failed"]);
   });
 
+  it("clamps a scrolling pane window at both ends and skips windowing when everything fits", () => {
+    expect(paneWindow(0, 10, 0)).toEqual({ start: 0, end: 0 });
+    expect(paneWindow(5, 10, 3)).toEqual({ start: 0, end: 5 });
+    expect(paneWindow(30, 10, 0)).toEqual({ start: 0, end: 10 });
+    expect(paneWindow(30, 10, 29)).toEqual({ start: 20, end: 30 });
+    expect(paneWindow(30, 10, 15)).toEqual({ start: 10, end: 20 });
+  });
+
   it("asks teammates before binding a matching local clone", async () => {
     const { actions, client, session, floor } = floorHarness({
       repository: { repositoryFullName: "openfloor/app", status: "ready" },
@@ -490,6 +499,158 @@ describe("TUI", () => {
     instances.push(instance);
     await waitForFrame(instance, "New local session · openfloor/app");
     expect(instance.lastFrame()).toContain("repository no longer matches");
+  });
+
+  it("arms exit on Ctrl+C and only exits on a second press", async () => {
+    const actions = { home: () => Promise.resolve({ props: { sessions: [], usage } }) } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "No sessions.");
+    instance.stdin.write("");
+    await waitForFrame(instance, "Press Ctrl+C again to exit");
+    instance.stdin.write("?");
+    await waitForFrame(instance, "keyboard help");
+    instance.stdin.write("");
+    await waitForFrame(instance, "Sessions");
+    instance.stdin.write("");
+    await pause(30);
+    const framesBeforeSecondPress = instance.frames.length;
+    instance.stdin.write("");
+    await pause(50);
+    instance.stdin.write("?");
+    await pause(50);
+    expect(instance.frames.length).toBe(framesBeforeSecondPress);
+  });
+
+  it("recalls the previous prompt with Up and restores the in-progress draft with Down", async () => {
+    const { actions, client, session } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "floor ›");
+    instance.stdin.write("first prompt"); await pause(); instance.stdin.write("\r");
+    await pause(50);
+    instance.stdin.write("draft two");
+    await pause();
+    expect(instance.lastFrame()).toContain("draft two");
+    instance.stdin.write("[A");
+    await waitForFrame(instance, "first prompt");
+    instance.stdin.write("[B");
+    await waitForFrame(instance, "draft two");
+  });
+
+  it("shows a working indicator while a background command runs", async () => {
+    const { actions, client, session } = floorHarness();
+    let resolveRun: () => void = () => {};
+    const runCommand = vi.fn(() => new Promise<void>((resolve) => { resolveRun = resolve; }));
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id, runCommand }));
+    instances.push(instance);
+    await waitForFrame(instance, "floor ›");
+    instance.stdin.write("/agents"); await pause(); instance.stdin.write("\r");
+    await waitForFrame(instance, "agents list");
+    expect(instance.lastFrame()).toContain("agents list");
+    resolveRun();
+    await pause(80);
+    expect(instance.lastFrame()).not.toContain("agents list");
+    expect(instance.lastFrame()).toContain("Command completed in background.");
+  });
+
+  it("scrolls the chat pane past its fixed window to reach the oldest message", async () => {
+    const messages = Array.from({ length: 12 }, (_, index) => ({ id: `message-${index}`, authorName: "Matt", recipientUserId: null, text: `chat-${index}` }));
+    const { actions, client, session } = floorHarness({ messages });
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "floor ›");
+    instance.stdin.write("\t");
+    await waitForFrame(instance, "› Team chat");
+    expect(instance.lastFrame()).toContain("more above");
+    expect(instance.lastFrame()).toContain("chat-11");
+    for (let index = 0; index < 11; index += 1) { instance.stdin.write("[A"); await pause(25); }
+    await waitForFrame(instance, "chat-0");
+    expect(instance.lastFrame()).not.toContain("more above");
+    await pause(30);
+    instance.stdin.write("\r");
+    await waitForFrame(instance, "Team message");
+    expect(instance.lastFrame()).toContain("chat-0");
+  });
+
+  it("cycles floor panels backwards with Shift+Tab", async () => {
+    const { actions, client, session } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "floor ›");
+    instance.stdin.write("[Z");
+    await waitForFrame(instance, "› Prompt queue");
+  });
+
+  it("no longer exits the app on bare q (superseded by two-press Ctrl+C and Ctrl+D)", async () => {
+    const actions = { home: () => Promise.resolve({ props: { sessions: [], usage } }) } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "No sessions.");
+    instance.stdin.write("q");
+    await pause(50);
+    expect(instance.lastFrame()).toContain("Commands start with /. Press / to open commands.");
+  });
+
+  it("archives a session from the Sessions list with a", async () => {
+    const session = { id: "12345678-1234-4234-8234-1234567890ab", title: "CLI floor", objective: null, role: "owner" as const, createdAt: 1, updatedAt: 1, endedAt: null, archivedAt: null };
+    const home = vi.fn().mockResolvedValue({ props: { sessions: [session], usage } });
+    const post = vi.fn().mockResolvedValue({});
+    const actions = { home, post } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "CLI floor");
+    instance.stdin.write("a");
+    await waitForFrame(instance, "Session actions");
+    expect(instance.lastFrame()).toContain("› Archive");
+    instance.stdin.write("\r");
+    await pause(80);
+    expect(post).toHaveBeenCalledWith(`/api/sessions/${session.id}/archive`);
+    await waitForFrame(instance, "Sessions");
+    expect(home.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("delete discloses a live candidate branch and issues exactly one DELETE for the chosen resolution", async () => {
+    const session = { id: "12345678-1234-4234-8234-1234567890ab", title: "CLI floor", objective: null, role: "owner" as const, createdAt: 1, updatedAt: 1, endedAt: null, archivedAt: null };
+    const home = vi.fn().mockResolvedValue({ props: { sessions: [session], usage } });
+    const del = vi.fn()
+      .mockImplementationOnce(() => Promise.reject(new OpenFloorError("Request refused", "conflict", 409, { code: "candidate_live", branch: "openfloor/session/candidate", canDeleteBranch: true })))
+      .mockImplementationOnce(() => Promise.resolve({}));
+    const actions = { home, delete: del } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "CLI floor");
+    instance.stdin.write("/"); await pause(); instance.stdin.write("delete"); await pause(); instance.stdin.write("\r");
+    await waitForFrame(instance, "Delete session");
+    instance.stdin.write("\r");
+    await waitForFrame(instance, "hasn't merged yet");
+    expect(instance.lastFrame()).toContain("openfloor/session/candidate");
+    expect(del).toHaveBeenCalledTimes(1);
+    expect(del).toHaveBeenNthCalledWith(1, `/api/sessions/${session.id}`, undefined);
+
+    instance.stdin.write("o");
+    await pause(80);
+    expect(del).toHaveBeenCalledTimes(2);
+    expect(del).toHaveBeenNthCalledWith(2, `/api/sessions/${session.id}`, { candidate: "orphan" });
+    await waitForFrame(instance, "Sessions");
+  });
+
+  it("reports a blocking integrating run without retrying delete automatically", async () => {
+    const session = { id: "12345678-1234-4234-8234-1234567890ab", title: "CLI floor", objective: null, role: "owner" as const, createdAt: 1, updatedAt: 1, endedAt: null, archivedAt: null };
+    const home = vi.fn().mockResolvedValue({ props: { sessions: [session], usage } });
+    const del = vi.fn().mockRejectedValue(new OpenFloorError("The candidate is still being updated", "conflict", 409, { runId: "aaaaaaaa-0000-4000-8000-000000000000" }));
+    const actions = { home, delete: del } as unknown as OpenFloorActions;
+    const instance = render(startTui({ actions, client: {} as ApiClient, baseUrl: "http://127.0.0.1:8787" }));
+    instances.push(instance);
+    await waitForFrame(instance, "CLI floor");
+    instance.stdin.write("/"); await pause(); instance.stdin.write("delete"); await pause(); instance.stdin.write("\r");
+    await waitForFrame(instance, "Delete session");
+    instance.stdin.write("\r");
+    await waitForFrame(instance, "still integrating");
+    expect(del).toHaveBeenCalledTimes(1);
+    instance.stdin.write("");
+    await waitForFrame(instance, "Sessions");
+    expect(del).toHaveBeenCalledTimes(1);
   });
 });
 

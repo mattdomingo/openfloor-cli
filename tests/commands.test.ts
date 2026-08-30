@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { buildProgram, chooseRepository } from "../src/commands.js";
+import { buildProgram, candidateLiveHint, chooseRepository } from "../src/commands.js";
+import { OpenFloorError } from "../src/errors.js";
 import { formatDuration, tokenize } from "../src/tui.js";
 
 const repositories = [
@@ -39,5 +40,16 @@ describe("public command surface", () => {
     expect(formatDuration(2_707)).toBe("45m 7s");
     expect(formatDuration(7_200)).toBe("2h");
     expect(formatDuration(0)).toBe("0s");
+  });
+
+  it("hints --candidate on a blocked sessions delete", () => {
+    const blocked = new OpenFloorError("Request refused", "conflict", 409, { code: "candidate_live", branch: "openfloor/session/candidate", canDeleteBranch: true });
+    const hinted = candidateLiveHint(blocked);
+    expect(hinted).toBeInstanceOf(OpenFloorError);
+    expect((hinted as OpenFloorError).message).toContain("--candidate delete-branch or --candidate orphan");
+    expect((hinted as OpenFloorError).message).toContain("openfloor/session/candidate");
+
+    const unrelated = new OpenFloorError("Only the owner can delete this session", "conflict", 403);
+    expect(candidateLiveHint(unrelated)).toBe(unrelated);
   });
 });

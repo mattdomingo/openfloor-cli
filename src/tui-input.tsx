@@ -53,6 +53,10 @@ export function EditableInput({ value, onChange, onSubmit, onEscape, onUp, onDow
       if (point > 0) update(current.slice(0, point - 1) + current.slice(point), point - 1);
       return;
     }
+    if (key.ctrl && input === "a") { cursorRef.current = 0; setCursor(0); return; }
+    if (key.ctrl && input === "e") { cursorRef.current = current.length; setCursor(current.length); return; }
+    if (key.ctrl && input === "u") { update(current.slice(point), 0); return; }
+    if (key.ctrl && input === "w") { const next = deleteWordLeft(current, point); update(next.value, next.cursor); return; }
     if (key.tab || key.ctrl || key.meta || !input) return;
     const safe = multiline ? input.replace(/\r\n?/g, "\n") : input.replace(/[\r\n]/g, "");
     if (!safe) return;

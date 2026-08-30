@@ -32,7 +32,9 @@ cloudflared access login --no-verbose --app https://app.opnflr.com/api/bootstrap
 
 The CLI keeps the returned JWT only in memory. `cloudflared` stores its Access state under an owner-only openfloor directory, isolated from `~/.cloudflared`. Later invocations ask it for the cached token. `openfloor auth logout` or TUI `/logout` removes only this isolated cache plus setup/session/workspace identity state, preserves display and server preferences, and exits. It does not revoke the remote Cloudflare session. Existing users authenticate once after upgrading to the isolated cache.
 
-Sessions uses a bottom command bar. Press `/` for selectable inline commands such as `/new`, `/settings`, `/credentials`, `/account`, `/help`, and `/logout`; `/` never filters sessions. `/exit` aliases `/quit` on Sessions. Creation, binding, settings, help, credentials, and item details are full terminal pages rather than popups.
+Sessions uses a bottom command bar. Press `/` for selectable inline commands such as `/new`, `/settings`, `/credentials`, `/account`, `/help`, and `/logout`; `/` never filters sessions. `/exit` aliases `/quit` on Sessions. Creation, binding, settings, help, credentials, session actions, removal confirmation, and item details are full terminal pages rather than popups.
+
+Press `a` on a selected session (or `/archive`, `/unarchive`, `/delete`, `/leave` from either command bar) to open the session-actions page. Archive/unarchive apply immediately with a status notice; delete and leave open a confirmation page that discloses a live candidate branch or a still-integrating run instead of retrying a blocked deletion automatically — you choose how to resolve it, then the command runs exactly once. A tone-coded notice line and a header spinner show mutation and background-command progress; `Ctrl+C` arms with a warning naming anything still in flight and exits on a second press within 2 seconds, and `Ctrl+D` on an empty prompt exits immediately — neither cancels a remote run.
 
 ## Session floor
 
@@ -43,7 +45,7 @@ Sessions uses a bottom command bar. Press `/` for selectable inline commands suc
 
 Type ordinary text to add work to the queue. Live work appears before completed, failed, cancelled, integrated, answered, or rolled-back items. Use `/chat <message>` for team chat. `/overview`, `/review`, and `/settings` open interactive pages; `/floor` returns; `/sessions` opens session selection. Direct aliases such as `/invite`, `/agents`, `/skills`, and `/runs` execute scriptable groups silently. `/run` remains accepted for compatibility but is hidden from suggestions. Repository work remains available through `openfloor repository …`, not TUI `/repository`.
 
-Prompt input has focus by default. Press `Tab` to cycle chat, live drafts, agents, queue, and prompt; use arrows to select; Enter opens or acts; Esc returns to prompt. Agent pane's Create row opens a full agent wizard. Review supports Files/Prompts and one-file diffs. Settings toggles owner-authorized routing values. Option+Backspace deletes one word. `/exit` returns nested pages to Floor, then Floor to Sessions; `/quit` exits. `/sync` retries paused local synchronization.
+Prompt input has focus by default. Press `Tab`/`Shift+Tab` to cycle chat, live drafts, agents, queue, and prompt forward/backward; use arrows to select and to scroll a pane past its visible window; Enter opens or acts; Esc returns to prompt. Agent pane's Create row opens a full agent wizard. Review supports Files/Prompts and one-file diffs. Settings toggles owner-authorized routing values. Editable fields support common readline chords (`Ctrl+A`/`E`/`U`/`W`) and Option+Backspace for word deletion; command bars recall history with Up/Down when no suggestions are showing. `/exit` returns nested pages to Floor, then Floor to Sessions; `/quit` exits. `/sync` retries paused local synchronization.
 
 `/credentials` connects API keys, Claude setup tokens, Kimi plan keys, or ChatGPT `auth.json` through masked write-only input. Secrets never enter shell history, config, logs, realtime drafts, or terminal output. `/account` opens browser-owned profile, billing, GitHub installation, and account controls.
 
@@ -59,4 +61,4 @@ Use `OPENFLOOR_BASE_URL=http://localhost:3000` for an openfloor development Work
 
 See [architecture](docs/architecture.md), [security](docs/security.md), [commands](docs/commands.md), [key map](docs/keymap.md), [development](docs/development.md), and [release](docs/release.md).
 
-API contracts were verified against openfloor commit `f6cdccc3074b841d07fcbc4a3731b925699fbb43` on 2026-08-28. Additive response fields remain compatible; missing or wrongly typed required fields produce an actionable compatibility error.
+API contracts were verified against openfloor commit `f902b8f9d435255cbf1fa8e3e219314a40a96018` on 2026-08-30. Additive response fields remain compatible; missing or wrongly typed required fields produce an actionable compatibility error.

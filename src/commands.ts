@@ -140,8 +140,12 @@ function registerSessions(program: Command): void {
         });
       });
     });
-  sessionNoBody(sessions, "archive", "POST", "archive");
-  sessionNoBody(sessions, "unarchive", "POST", "unarchive");
+  sessions.command("archive").action(async function (this: Command) {
+    await run(this, async ({ actions, sessionId }) => { await actions.post(`/api/sessions/${sessionId!}/archive`); return { sessionId: sessionId!, archived: true }; }, true);
+  });
+  sessions.command("unarchive").action(async function (this: Command) {
+    await run(this, async ({ actions, sessionId }) => { await actions.post(`/api/sessions/${sessionId!}/unarchive`); return { sessionId: sessionId!, archived: false }; }, true);
+  });
   sessionNoBody(sessions, "lock", "POST", "lock");
   sessionNoBody(sessions, "unlock", "DELETE", "lock");
   sessions.command("end").action(async function (this: Command) { await confirm(this, "End this session permanently?"); await run(this, ({ actions, sessionId }) => actions.post(`/api/sessions/${sessionId!}/end`), true); });
@@ -149,8 +153,26 @@ function registerSessions(program: Command): void {
   sessions.command("delete").addOption(new Option("--candidate <choice>").choices(["delete-branch", "orphan"]))
     .action(async function (this: Command, options: AnyOptions) {
       await confirm(this, `Delete this session${options.candidate ? ` and ${options.candidate === "orphan" ? "orphan" : "delete"} its candidate branch` : ""}?`);
-      await run(this, ({ actions, sessionId }) => actions.delete(`/api/sessions/${sessionId!}`, options.candidate ? { candidate: options.candidate } : undefined), true);
+      await run(this, async ({ actions, sessionId }) => {
+        try {
+          return await actions.delete(`/api/sessions/${sessionId!}`, options.candidate ? { candidate: options.candidate } : undefined);
+        } catch (error) {
+          throw candidateLiveHint(error);
+        }
+      }, true);
     });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** Rethrows a 409 candidate_live delete failure with the --candidate flags the caller needs; passes other errors through unchanged. */
+export function candidateLiveHint(error: unknown): unknown {
+  if (!(error instanceof OpenFloorError) || error.code !== "conflict" || !isRecord(error.details)) return error;
+  const { details } = error;
+  if (details.code !== "candidate_live" || typeof details.branch !== "string") return error;
+  return new OpenFloorError(`${error.message}. Candidate branch ${details.branch} hasn't merged yet; pass --candidate delete-branch or --candidate orphan.`, error.code, error.status, error.details);
 }
 
 function sessionNoBody(group: Command, name: string, method: "POST" | "DELETE", endpoint: string): void {
