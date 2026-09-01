@@ -573,6 +573,76 @@ describe("TUI", () => {
     expect(instance.lastFrame()).toContain("chat-0");
   });
 
+  it("completes an @agent mention with Tab instead of cycling panels", async () => {
+    const { actions, client, session, post } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "floor ›");
+    instance.stdin.write("@bu");
+    await waitForFrame(instance, "@Builder");
+    expect(instance.lastFrame()).toContain("Engineer · openai/default");
+    instance.stdin.write("\t");
+    await waitForFrame(instance, "floor › @Builder");
+    expect(instance.lastFrame()).not.toContain("› Team chat");
+    instance.stdin.write("ship it"); await pause(); instance.stdin.write("\r");
+    await pause(80);
+    expect(post).toHaveBeenCalledWith(`/api/sessions/${session.id}/queue`, { prompt: "@Builder ship it", agentId: null });
+  });
+
+  it("completes an @agent mention with Enter before it can submit a partial name", async () => {
+    const { actions, client, session, post } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "floor ›");
+    instance.stdin.write("@bu"); await waitForFrame(instance, "@Builder");
+    instance.stdin.write("\r"); await pause(60);
+    expect(post).not.toHaveBeenCalled();
+    expect(instance.lastFrame()).toContain("floor › @Builder");
+  });
+
+  it("clears the prompt on a double Escape, then leaves the session on the next double Escape", async () => {
+    const { actions, client, session } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "floor ›");
+    instance.stdin.write("draft text");
+    await waitForFrame(instance, "draft text");
+    instance.stdin.write("\u001b"); await pause();
+    expect(instance.lastFrame()).toContain("Press Esc again to clear the prompt.");
+    expect(instance.lastFrame()).toContain("draft text");
+    instance.stdin.write("\u001b"); await pause(40);
+    expect(instance.lastFrame()).not.toContain("draft text");
+    instance.stdin.write("\u001b"); await pause();
+    expect(instance.lastFrame()).toContain("Press Esc again to return to Sessions.");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "CLI floor");
+    expect(instance.lastFrame()).toContain("Sessions");
+  });
+
+  it("returns a nested session page to the floor on a double Escape", async () => {
+    const { actions, client, session } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "floor ›");
+    instance.stdin.write("/overview"); await pause(); instance.stdin.write("\r");
+    await waitForFrame(instance, "Members");
+    instance.stdin.write("\u001b"); await pause();
+    expect(instance.lastFrame()).toContain("Press Esc again to return to the floor.");
+    instance.stdin.write("\u001b");
+    await waitForFrame(instance, "Prompt queue");
+  });
+
+  it("first Escape closes an open suggestion list without clearing typed text", async () => {
+    const { actions, client, session } = floorHarness();
+    const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));
+    instances.push(instance);
+    await waitForFrame(instance, "floor ›");
+    instance.stdin.write("/ov"); await waitForFrame(instance, "session overview");
+    instance.stdin.write("\u001b"); await pause(40);
+    expect(instance.lastFrame()).not.toContain("session overview");
+    expect(instance.lastFrame()).toContain("floor › /ov");
+  });
+
   it("cycles floor panels backwards with Shift+Tab", async () => {
     const { actions, client, session } = floorHarness();
     const instance = render(startTui({ actions, client, baseUrl: "http://127.0.0.1:9", initialSessionId: session.id }));

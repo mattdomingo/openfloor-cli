@@ -16,7 +16,9 @@ import { sanitizeTerminal } from "./sanitize.js";
 import { credentialBody, credentialLabel, PROVIDER_CREDENTIAL_KINDS, PROVIDER_LABELS, PROVIDER_MODELS, PROVIDERS, type Provider } from "./providers.js";
 import { EditableInput } from "./tui-input.js";
 import { HistoryBuffer } from "./history.js";
-import { errorMessage, PageFrame, ChoiceList } from "./tui-shared.js";
+import { errorMessage, PageFrame, Panel, ChoiceList, SuggestionList, rowStyle, focusFrame, useEscapeGesture, type Suggestion } from "./tui-shared.js";
+import { ACCENT, accentFor, BRAND, FOCUS, IDLE, noticeColor, statusColor } from "./theme.js";
+import { applyMention, commandSuggestions, mentionAt, rankNames, type CommandSpec } from "./suggest.js";
 import { SessionActionsPage, ConfirmSessionRemoval, type SessionAction } from "./tui-sessions.js";
 import { requireCleanWorkspace, synchronizeWorkspace, type LocalWorkspace } from "./workspace.js";
 
@@ -47,6 +49,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
   const [page, setPage] = useState<Page>(initialSessionId ? "floor" : workspace ? "create-session" : "sessions");
   const [homeCommandActive, setHomeCommandActive] = useState(false);
   const [pagePanelFocused, setPagePanelFocused] = useState(false);
+  const [promptMenuOpen, setPromptMenuOpen] = useState(false);
   const [credentialsReturn, setCredentialsReturn] = useState<"sessions" | "floor">("sessions");
   const [workspaceStartupResolved, setWorkspaceStartupResolved] = useState(!workspace || !initialSessionId);
   const [notice, setNotice] = useState<Notice | null>(workspace ? { text: `Local workspace: ${workspace.repositoryFullName}`, tone: "info" } : null);
@@ -331,13 +334,13 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
       if (key.ctrl && input === "k") { setFloorFocus("prompt"); setFloorDetail(null); return; }
       if (input === "?" && page === "floor") { setPage("help"); setFloorFocus("prompt"); setFloorDetail(null); return; }
       if (page !== "floor") {
-        if (key.tab) { setPagePanelFocused((current) => !current); return; }
+        if (key.tab) { if (!pagePanelFocused && promptMenuOpen) return; setPagePanelFocused((current) => !current); return; }
         if (key.escape && pagePanelFocused && page !== "review" && page !== "settings") { setPagePanelFocused(false); return; }
         return;
       }
       if (floorDetail) { if (key.escape) setFloorDetail(null); return; }
       const focusCycle: Array<"prompt" | FloorPane> = ["prompt", "chat", "drafts", "agents", "queue"];
-      if (key.tab) { const offset = key.shift ? -1 : 1; setFloorFocus((current) => focusCycle[(focusCycle.indexOf(current) + offset + focusCycle.length) % focusCycle.length]!); return; }
+      if (key.tab) { if (floorFocus === "prompt" && promptMenuOpen) return; const offset = key.shift ? -1 : 1; setFloorFocus((current) => focusCycle[(focusCycle.indexOf(current) + offset + focusCycle.length) % focusCycle.length]!); return; }
       if (floorFocus === "prompt") return;
       const panes: FloorPane[] = ["chat", "drafts", "agents", "queue"];
       if (key.escape) { setFloorFocus("prompt"); return; }
@@ -380,7 +383,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
     {page === "credentials" && <CredentialsPage actions={actions} close={() => setPage(credentialsReturn)} setNotice={setNoticeText} />}
     {page === "create-session" && <CreateSessionWizard actions={actions} baseUrl={baseUrl} close={goSessions} {...(workspace ? { workspace } : {})} onCreated={(id, ready, message) => { notify(message, ready ? "success" : "warn"); void homeQuery.refetch(); if (ready) void enterSession(id, Boolean(workspace)); }} />}
     {page === "bind-workspace" && workspace && floor && <BindWorkspaceConfirm workspace={workspace} repositoryName={repositoryName} branch={candidateBranch} sha={candidateSha} close={() => setPage("floor")} confirm={enableWorkspaceSync} />}
-    {page === "bind-workspace" && (!workspace || !floor) && <PageFrame title="Local sync unavailable"><Text>No matching local GitHub workspace is available.</Text><Text dimColor>Esc returns to the floor.</Text></PageFrame>}
+    {page === "bind-workspace" && (!workspace || !floor) && <PageFrame title="Local sync unavailable" accent={ACCENT.workspace}><Text>No matching local GitHub workspace is available.</Text><Text dimColor>Esc returns to the floor.</Text></PageFrame>}
     {page === "create-agent" && sessionId && <CreateAgentPage actions={actions} sessionId={sessionId} members={members} close={() => setPage("floor")} completed={() => { refreshSession(); notify("Agent created.", "success"); setPage("floor"); }} />}
     {page === "session-actions" && sessionActionTarget && <SessionActionsPage session={sessionActionTarget.session} close={() => setPage(sessionActionTarget.back)} onSelect={(action) => { if (action === "cancel") return; void runSessionAction(sessionActionTarget.session, action, sessionActionTarget.back); }} />}
     {page === "confirm-removal" && removal && <ConfirmSessionRemoval session={removal.session} actions={actions} mode={removal.mode} close={() => setPage(removal.back)} onRemoved={handleSessionRemoved} />}
@@ -388,7 +391,7 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
       ? <SessionLoadError error={sessionLoadError} />
       : floor ? <>
       {page === "floor" ? floorDetail ? <FloorItemDetail detail={floorDetail} floor={floor} drafts={drafts} activities={activities} /> : <FloorDashboard width={width} floor={floor} online={online} drafts={drafts} activities={activities} focus={floorFocus} rows={paneRows} /> : <PageView page={page} floor={floor} members={members} owner={sessionQuery.data?.props.session.role === "owner"} online={online} skills={skillsQuery.data} mcp={mcpQuery.data} active={pagePanelFocused} focusPrompt={() => setPagePanelFocused(false)} actions={actions} sessionId={sessionId} refresh={refreshSession} setNotice={setNoticeText} {...(workspace ? { workspace } : {})} localSync={effectiveLocalSync} />}
-      <CommandBar key={page} page={page} sessionId={sessionId} actions={actions} history={sessionHistory} {...((globalThis as Record<string, unknown>).__openfloorPresence ? { presence: (globalThis as Record<string, unknown>).__openfloorPresence as PresenceClient } : {})} focused={page === "floor" ? floorFocus === "prompt" && !floorDetail : !pagePanelFocused} navigate={(next) => { setPage(next); setFloorDetail(null); setFloorFocus("prompt"); setPagePanelFocused(false); }} openCredentials={() => { setCredentialsReturn("floor"); setPage("credentials"); }} goSessions={goSessions} refresh={refreshSession} retryWorkspaceSync={retryWorkspaceSync} runBackground={runBackground} sessionAction={(action) => { const target = sessionQuery.data?.props.session; if (!target) { notify("Session details are not loaded yet.", "warn"); return; } void runSessionAction(target, action, "floor"); }} logout={logout} setNotice={setNoticeText} exitApp={exit} />
+      <CommandBar key={page} page={page} sessionId={sessionId} actions={actions} history={sessionHistory} agents={floor.agents} onMenu={setPromptMenuOpen} {...((globalThis as Record<string, unknown>).__openfloorPresence ? { presence: (globalThis as Record<string, unknown>).__openfloorPresence as PresenceClient } : {})} focused={page === "floor" ? floorFocus === "prompt" && !floorDetail : !pagePanelFocused} navigate={(next) => { setPage(next); setFloorDetail(null); setFloorFocus("prompt"); setPagePanelFocused(false); }} openCredentials={() => { setCredentialsReturn("floor"); setPage("credentials"); }} goSessions={goSessions} refresh={refreshSession} retryWorkspaceSync={retryWorkspaceSync} runBackground={runBackground} sessionAction={(action) => { const target = sessionQuery.data?.props.session; if (!target) { notify("Session details are not loaded yet.", "warn"); return; } void runSessionAction(target, action, "floor"); }} logout={logout} setNotice={setNoticeText} exitApp={exit} />
     </> : <LoadingView message="Loading session floor…" escape={homeQuery.isLoading && !homeQuery.data ? "Esc stops and exits" : "Esc stops and returns to Sessions"} />)}
     {isHomePage(page) && <HomeCommandBar active={homeCommandActive} setActive={setHomeCommandActive} page={page} submit={executeHomeCommand} setNotice={setNoticeText} history={homeHistory} exitApp={exit} />}
     <Text dimColor>{hintFor(page, sessionId != null, floorFocus, pagePanelFocused)}</Text>
@@ -397,30 +400,34 @@ function App({ actions, client, baseUrl, initialSessionId, workspace, logout = l
 
 function Header({ user, session, connection, workspace, localSync, busy, spinnerFrame, elapsedSeconds }: { user?: AppUser; session?: SessionSummary; connection: ConnectionStatus; workspace?: LocalWorkspace; localSync: LocalSync; busy: Busy | null; spinnerFrame: number; elapsedSeconds: number }) {
   const syncText = !workspace ? "" : localSync === "live" ? " · local live" : localSync === "syncing" ? " · syncing local" : localSync === "paused" ? " · local paused" : localSync === "mismatch" ? " · different repository" : "";
-  return <Box borderStyle="round" borderColor="cyan" paddingX={1} justifyContent="space-between"><Text bold color="cyan">openfloor</Text><Text>{user ? `Logged in as ${user.displayName || user.email} · ` : ""}{session ? `${session.title} · ` : ""}<Text color={connection === "live" ? "green" : connection === "quota-exhausted" ? "red" : "yellow"}>{connection}</Text><Text color={localSync === "live" ? "green" : "yellow"}>{syncText}</Text>{busy && <Text color="cyan"> · {SPINNER_FRAMES[spinnerFrame]} {busy.label} · {elapsedSeconds}s</Text>}</Text></Box>;
+  return <Box borderStyle="round" borderColor={IDLE} paddingX={1} justifyContent="space-between"><Text bold color={BRAND}>openfloor</Text><Text>{user ? <Text dimColor>{`Logged in as ${user.displayName || user.email} · `}</Text> : ""}{session ? <Text color={ACCENT.floor}>{`${session.title} · `}</Text> : ""}<Text color={connection === "live" ? "green" : connection === "quota-exhausted" ? "red" : "yellow"}>{connection}</Text><Text color={localSync === "live" ? "green" : "yellow"}>{syncText}</Text>{busy && <Text color={ACCENT.workspace}> · {SPINNER_FRAMES[spinnerFrame]} {busy.label} · {elapsedSeconds}s</Text>}</Text></Box>;
 }
 
 function Home({ sessions, selected, usage, workspace }: { sessions: SessionSummary[]; selected: number; usage?: Usage; workspace?: LocalWorkspace }) {
   const groups = [["Active", sessions.filter((session) => session.endedAt == null && session.archivedAt == null)], ["Archived", sessions.filter((session) => session.endedAt == null && session.archivedAt != null)], ["Ended", sessions.filter((session) => session.endedAt != null)]] as const;
-  return <PageFrame title="Sessions">{workspace && <Text color="cyan">Git workspace detected: {workspace.repositoryFullName}</Text>}{sessions.length === 0 ? <Text dimColor>No sessions. Use /new to create one.</Text> : groups.map(([label, values]) => values.length ? <Box key={label} flexDirection="column"><Text bold>{label}</Text>{values.map((session) => { const index = sessions.indexOf(session); return <Text key={session.id} inverse={index === selected} {...(index === selected ? { color: "cyan" as const } : {})}>{index === selected ? "›" : " "} {session.title.padEnd(30).slice(0, 30)} {shortId(session.id)} {session.role}</Text>; })}</Box> : null)}{usage && <UsageSummary usage={usage} />}</PageFrame>;
+  const groupColor: Record<string, string> = { Active: "green", Archived: "yellow", Ended: IDLE };
+  const groupAccent = (label: string) => groupColor[label] ?? IDLE;
+  return <PageFrame title="Sessions" accent={ACCENT.sessions}>{workspace && <Text color={ACCENT.workspace}>Git workspace detected: {workspace.repositoryFullName}</Text>}{sessions.length === 0 ? <Text dimColor>No sessions. Use /new to create one.</Text> : groups.map(([label, values]) => values.length ? <Box key={label} flexDirection="column"><Text bold color={groupAccent(label)}>{label}</Text>{values.map((session) => { const index = sessions.indexOf(session); return <Text key={session.id} {...rowStyle(index === selected)}>{index === selected ? "›" : " "} {session.title.padEnd(30).slice(0, 30)} <Text dimColor>{shortId(session.id)}</Text> {session.role}</Text>; })}</Box> : null)}{usage && <UsageSummary usage={usage} />}</PageFrame>;
 }
 
 function CliSettings({ baseUrl }: { baseUrl: string }) {
-  return <PageFrame title="CLI settings"><Text>Server: {baseUrl}</Text><Text>Authentication: Cloudflare Access in an openfloor-only local cache</Text><Text dimColor>/logout removes this CLI's cached Access session and workspace bindings.</Text><Text bold>Connections</Text><Text>/credentials safely connects AI credentials without shell history.</Text><Text bold>Browser-owned settings</Text><Text>/account opens profile, billing, GitHub installations, and account controls.</Text><Text dimColor>/exit returns to Sessions.</Text></PageFrame>;
+  return <PageFrame title="CLI settings" accent={ACCENT.settings}><Text>Server: {baseUrl}</Text><Text>Authentication: Cloudflare Access in an openfloor-only local cache</Text><Text dimColor>/logout removes this CLI's cached Access session and workspace bindings.</Text><Text bold>Connections</Text><Text>/credentials safely connects AI credentials without shell history.</Text><Text bold>Browser-owned settings</Text><Text>/account opens profile, billing, GitHub installations, and account controls.</Text><Text dimColor>/exit returns to Sessions.</Text></PageFrame>;
 }
 
 function HelpPage({ session }: { session: boolean }) {
-  return <PageFrame title="keyboard help">{session ? <>
+  return <PageFrame title="keyboard help" accent={ACCENT.help}>{session ? <>
     <Text>Type ordinary text to queue work; use /chat &lt;message&gt; for team chat.</Text>
+    <Text>@ opens the agent list and filters as you type; Tab or Enter completes the highlighted agent.</Text>
     <Text>/floor /overview /review /settings /sessions /credentials /sync /refresh /exit /quit</Text>
     <Text>/invite /members /agents /assignments /routing /queue /files /runs /conflicts /skills /mcp</Text>
     <Text>/archive /unarchive /delete /leave manage this session's lifecycle</Text>
     <Text>Tab · Shift+Tab: cycle panels · arrows: navigate and scroll · Enter: open · Esc: returns to prompt</Text>
+    <Text>Esc in the prompt closes a suggestion list; Esc twice clears typed text, or goes back one page when empty</Text>
     <Text>Up/Down in the prompt bar recall command history when there are no suggestions showing</Text>
   </> : <>
     <Text>↑↓ select · Enter opens · n creates · a session actions (archive/delete/leave) · / starts a command</Text>
     <Text>/new /archive /unarchive /delete /leave /settings /credentials /account /help /logout /refresh /exit /quit</Text>
-    <Text>Ctrl+K focuses commands · Up/Down recall command history · Esc closes command entry</Text>
+    <Text>Ctrl+K focuses commands · Up/Down recall command history · Tab completes · Esc twice clears, then closes command entry</Text>
   </>}
     <Text>Ctrl+A/E: start/end of line · Ctrl+U: clear to start · Ctrl+W / Option+Backspace: delete word</Text>
     <Text>Ctrl+C twice within 2s, or Ctrl+D on an empty prompt, exits. Neither cancels a remote run.</Text>
@@ -430,9 +437,10 @@ function HelpPage({ session }: { session: boolean }) {
 function UsageSummary({ usage }: { usage: Usage }) {
   const plan = `${capitalize(usage.effectivePlan)} plan`;
   const allowance = `${usage.limitHours === null ? "Unlimited session time" : `${usage.limitHours} session hours per month`} · ${usage.limitSeats === null ? "Unlimited seats" : `${usage.limitSeats} seats per session`}`;
-  if (usage.limitHours === null) return <Box flexDirection="column" marginTop={1}><Text bold color="cyan">{plan}</Text><Text>{allowance}</Text><Text dimColor>{formatDuration(usage.seconds)} used this month (UTC)</Text></Box>;
+  if (usage.limitHours === null) return <Box flexDirection="column" marginTop={1}><Text bold color={ACCENT.sessions}>{plan}</Text><Text>{allowance}</Text><Text dimColor>{formatDuration(usage.seconds)} used this month (UTC)</Text></Box>;
   const limitSeconds = usage.limitHours * 3_600; const used = limitSeconds > 0 ? Math.min(1, usage.seconds / limitSeconds) : 1; const filled = Math.round(used * 20);
-  return <Box flexDirection="column" marginTop={1}><Text bold color="cyan">{plan}</Text><Text>{allowance}</Text><Text color="cyan">{"█".repeat(filled)}{"░".repeat(20 - filled)} {Math.round(used * 100)}%</Text><Text>{formatDuration(usage.seconds)} used · {formatDuration(Math.max(0, limitSeconds - usage.seconds))} remaining</Text></Box>;
+  const meter = used >= 0.9 ? "red" : used >= 0.7 ? "yellow" : "green";
+  return <Box flexDirection="column" marginTop={1}><Text bold color={ACCENT.sessions}>{plan}</Text><Text>{allowance}</Text><Text color={meter}>{"█".repeat(filled)}{"░".repeat(20 - filled)} {Math.round(used * 100)}%</Text><Text>{formatDuration(usage.seconds)} used · {formatDuration(Math.max(0, limitSeconds - usage.seconds))} remaining</Text></Box>;
 }
 
 function FloorDashboard({ width, floor, online, drafts, activities, focus, rows }: { width: number; floor: FloorSnapshot; online: Set<string>; drafts: TypingDraft[]; activities: Record<string, Array<{ sequence: number; kind: string; detail: string }>>; focus: "prompt" | FloorPane; rows: Record<FloorPane, number> }) {
@@ -449,28 +457,26 @@ function FloorDashboard({ width, floor, online, drafts, activities, focus, rows 
   const queueRow = effectivePaneRow("queue", rows.queue, queue.length);
   const queueSpan = paneWindow(queue.length, 14, queueRow);
   const queueVisible = queue.slice(queueSpan.start, queueSpan.end);
-  const chatPanel = <Panel title="Team chat" width="100%" active={focus === "chat"}>{chatVisible.length ? <>
+  const chatPanel = <Panel title="Team chat" accent={ACCENT.chat} width="100%" active={focus === "chat"}>{chatVisible.length ? <>
     {chatSpan.start > 0 && <Text dimColor>↑ {chatSpan.start} more above</Text>}
-    {chatVisible.map((message, index) => <Text key={recordText(message, "id", String(chatSpan.start + index))} inverse={focus === "chat" && chatSpan.start + index === chatRow}><Text bold color="cyan">{recordText(message, "authorName", "Member")}</Text>: {recordText(message, "text")}</Text>)}
+    {chatVisible.map((message, index) => <Text key={recordText(message, "id", String(chatSpan.start + index))} {...rowStyle(chatSpan.start + index === chatRow, focus === "chat")}><Text bold color={ACCENT.chat}>{recordText(message, "authorName", "Member")}</Text>: {recordText(message, "text")}</Text>)}
     {chatSpan.end < messages.length && <Text dimColor>↓ {messages.length - chatSpan.end} more below</Text>}
   </> : <Text dimColor>No public messages. Use /chat message.</Text>}{online.size > 0 && <Text dimColor>{online.size} online</Text>}</Panel>;
-  const draftsPanel = <Panel title="Live teammate prompts" width="100%" active={focus === "drafts"}>{draftsVisible.length ? <>
+  const draftsPanel = <Panel title="Live teammate prompts" accent={ACCENT.drafts} width="100%" active={focus === "drafts"}>{draftsVisible.length ? <>
     {draftsSpan.start > 0 && <Text dimColor>↑ {draftsSpan.start} more above</Text>}
-    {draftsVisible.map((draft, index) => <Text key={draft.userId} inverse={focus === "drafts" && draftsSpan.start + index === draftsRow} color="yellow"><Text bold>{draft.displayName}</Text>: {draft.text.slice(0, 100)}</Text>)}
+    {draftsVisible.map((draft, index) => <Text key={draft.userId} {...rowStyle(draftsSpan.start + index === draftsRow, focus === "drafts")} color={focus === "drafts" && draftsSpan.start + index === draftsRow ? FOCUS : ACCENT.drafts}><Text bold>{draft.displayName}</Text>: {draft.text.slice(0, 100)}</Text>)}
     {draftsSpan.end < drafts.length && <Text dimColor>↓ {drafts.length - draftsSpan.end} more below</Text>}
   </> : <Text dimColor>No teammates drafting.</Text>}</Panel>;
   return <Box flexDirection={horizontal ? "row" : "column"} minHeight={22}>
     {horizontal ? <Box flexDirection="column" width="28%">{chatPanel}{draftsPanel}</Box> : <>{chatPanel}{draftsPanel}</>}
-    <Panel title="Agent floor" width={horizontal ? "44%" : "100%"} active={focus === "agents"}>{floor.agents.map((agent, index) => { const run = floor.runs.filter((item) => item.agentId === agent.id).sort((left, right) => right.updatedAt - left.updatedAt)[0]; const live = run ? activities[run.id]?.at(-1) : undefined; const status = agent.pausedAt ? "paused" : run?.status ?? "idle"; return <Box key={agent.id} flexDirection="column" marginBottom={1}><Text inverse={focus === "agents" && index === agentsRow} bold color={statusColor(status)}>● {agent.name} <Text dimColor>{agent.provider}/{agent.model ?? "default"}</Text></Text><Text>{agent.role}: {agent.task}</Text><Text color={statusColor(status)}>{status}{live ? ` · ${live.detail}` : ""}</Text></Box>; })}<Text inverse={focus === "agents" && agentsRow === floor.agents.length} color="cyan">＋ Create agent</Text></Panel>
-    <Panel title="Prompt queue" width={horizontal ? "28%" : "100%"} active={focus === "queue"}>{queueVisible.length ? <>
+    <Panel title="Agent floor" accent={ACCENT.agents} width={horizontal ? "44%" : "100%"} active={focus === "agents"}>{floor.agents.map((agent, index) => { const run = floor.runs.filter((item) => item.agentId === agent.id).sort((left, right) => right.updatedAt - left.updatedAt)[0]; const live = run ? activities[run.id]?.at(-1) : undefined; const status = agent.pausedAt ? "paused" : run?.status ?? "idle"; return <Box key={agent.id} flexDirection="column" marginBottom={1}><Text {...rowStyle(index === agentsRow, focus === "agents")} bold {...(focus === "agents" && index === agentsRow ? {} : { color: statusColor(status) })}>● {agent.name} <Text dimColor>{agent.provider}/{agent.model ?? "default"}</Text></Text><Text>{agent.role}: {agent.task}</Text><Text color={statusColor(status)}>{status}{live ? ` · ${live.detail}` : ""}</Text></Box>; })}<Text {...rowStyle(agentsRow === floor.agents.length, focus === "agents")} {...(focus === "agents" && agentsRow === floor.agents.length ? {} : { color: ACCENT.create })}>＋ Create agent</Text></Panel>
+    <Panel title="Prompt queue" accent={ACCENT.queue} width={horizontal ? "28%" : "100%"} active={focus === "queue"}>{queueVisible.length ? <>
       {queueSpan.start > 0 && <Text dimColor>↑ {queueSpan.start} more above</Text>}
-      {queueVisible.map((item, index) => <Box key={item.id} flexDirection="column" marginBottom={1}><Text inverse={focus === "queue" && queueSpan.start + index === queueRow} color={statusColor(item.status)}>{String(item.position + 1).padStart(2)} · {item.status} · {item.agentName ?? "unassigned"}</Text><Text>{item.prompts.map((prompt) => prompt.text).join(" / ").slice(0, 100)}</Text></Box>)}
+      {queueVisible.map((item, index) => <Box key={item.id} flexDirection="column" marginBottom={1}><Text {...rowStyle(queueSpan.start + index === queueRow, focus === "queue")} {...(focus === "queue" && queueSpan.start + index === queueRow ? {} : { color: statusColor(item.status) })}>{String(item.position + 1).padStart(2)} · {item.status} · {item.agentName ?? "unassigned"}</Text><Text>{item.prompts.map((prompt) => prompt.text).join(" / ").slice(0, 100)}</Text></Box>)}
       {queueSpan.end < queue.length && <Text dimColor>↓ {queue.length - queueSpan.end} more below</Text>}
     </> : <Text dimColor>Queue empty. Type a prompt below.</Text>}</Panel>
   </Box>;
 }
-
-function Panel({ title, width, active, children }: { title: string; width: number | `${number}%`; active: boolean; children: React.ReactNode }) { return <Box flexDirection="column" width={width} borderStyle={active ? "double" : "round"} borderColor={active ? "cyan" : "gray"} paddingX={1}><Text bold color="cyan">{active ? "› " : ""}{title}</Text>{children}</Box>; }
 
 function FloorItemDetail({ detail, floor, drafts, activities }: { detail: FloorDetail; floor: FloorSnapshot; drafts: TypingDraft[]; activities: Record<string, Array<{ sequence: number; kind: string; detail: string }>> }) {
   if (detail.pane === "chat") { const message = teamMessages(floor)[detail.index]; return <Detail title="Team message"><Text bold>{recordText(message, "authorName", "Member")}</Text><Text>{recordText(message, "text")}</Text><Text dimColor>Esc returns to floor</Text></Detail>; }
@@ -479,16 +485,16 @@ function FloorItemDetail({ detail, floor, drafts, activities }: { detail: FloorD
   const item = orderedQueue(floor)[detail.index]; if (!item) return <Detail title="Prompt">Prompt no longer available.</Detail>; return <Detail title={`Queue ${item.position + 1}`}><Text>Status: {item.status} · {item.agentName ?? "unassigned"}</Text>{item.prompts.map((prompt) => <Text key={prompt.id}><Text bold>{prompt.authorName}:</Text> {prompt.text}</Text>)}<Text dimColor>ID {item.id} · Esc returns to floor</Text></Detail>;
 }
 
-function Detail({ title, children }: { title: string; children: React.ReactNode }) { return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={1} minHeight={22}><Text bold color="cyan">{title}</Text>{children}</Box>; }
+function Detail({ title, children }: { title: string; children: React.ReactNode }) { return <Panel title={title} accent={ACCENT.floor} minHeight={22} width="100%">{children}</Panel>; }
 
 function PageView({ page, floor, members, owner, online, skills, mcp, workspace, localSync, active, focusPrompt, actions, sessionId, refresh, setNotice }: { page: Exclude<SessionPage, "floor">; floor: FloorSnapshot; members: SessionMember[]; owner: boolean; online: Set<string>; skills: unknown; mcp: unknown; workspace?: LocalWorkspace; localSync: LocalSync; active: boolean; focusPrompt: () => void; actions: OpenFloorActions; sessionId: string; refresh: () => void; setNotice: (message: string) => void }) {
   if (page === "review") return <ReviewPage actions={actions} sessionId={sessionId} floor={floor} active={active} focusPrompt={focusPrompt} />;
   if (page === "settings") return <SessionSettingsPage actions={actions} sessionId={sessionId} floor={floor} owner={owner} skills={skills} mcp={mcp} active={active} focusPrompt={focusPrompt} refresh={refresh} setNotice={setNotice} />;
-  return <Box flexDirection="column" borderStyle={active ? "double" : "round"} borderColor={active ? "cyan" : "gray"} paddingX={1} minHeight={22}><Text bold color="cyan">/{page}</Text>
-    {page === "overview" && <><Text bold>Members</Text>{members.map((member) => <Text key={member.id} color={online.has(member.id) ? "green" : "white"}>● {member.displayName} · {member.role}{online.has(member.id) ? " · online" : ""}</Text>)}<Text bold>Assignments</Text>{floor.assignments.length ? floor.assignments.map((assignment) => <Text key={recordText(assignment, "userId")}>{recordText(assignment, "userName")}: {recordText(assignment, "task", "Unassigned")}</Text>) : <Text dimColor>No assignments.</Text>}<Text bold>Repository</Text><Text>{recordText(floor.repository, "repositoryFullName", "No repository")} · {recordText(floor.activeCandidate, "branchName", "No candidate")}</Text>{workspace && <Text>Local: {workspace.root} · {localSync}</Text>}</>}
+  return <Panel title={`/${page}`} accent={accentFor(page)} active={active} minHeight={22} width="100%">
+    {page === "overview" && <><Text bold color={ACCENT.overview}>Members</Text>{members.map((member) => <Text key={member.id} color={online.has(member.id) ? "green" : "white"}>● {member.displayName} · {member.role}{online.has(member.id) ? " · online" : ""}</Text>)}<Text bold color={ACCENT.overview}>Assignments</Text>{floor.assignments.length ? floor.assignments.map((assignment) => <Text key={recordText(assignment, "userId")}>{recordText(assignment, "userName")}: {recordText(assignment, "task", "Unassigned")}</Text>) : <Text dimColor>No assignments.</Text>}<Text bold color={ACCENT.workspace}>Repository</Text><Text>{recordText(floor.repository, "repositoryFullName", "No repository")} · {recordText(floor.activeCandidate, "branchName", "No candidate")}</Text>{workspace && <Text>Local: {workspace.root} · {localSync}</Text>}</>}
     {page === "help" && <HelpPage session />}
-    <Text dimColor>{active ? "Esc returns to command bar" : "Tab enters this page · /exit returns to floor"}</Text>
-  </Box>;
+    <Text dimColor>{active ? "Esc returns to command bar" : "Tab enters this page · Esc Esc returns to the floor"}</Text>
+  </Panel>;
 }
 
 function ReviewPage({ actions, sessionId, floor, active, focusPrompt }: { actions: OpenFloorActions; sessionId: string; floor: FloorSnapshot; active: boolean; focusPrompt: () => void }) {
@@ -534,15 +540,15 @@ function ReviewPage({ actions, sessionId, floor, active, focusPrompt }: { action
     } else if (key.return && phase === "files" && selectedFile) { setTargetPath(selectedFile.path); setOffset(0); setPhase("diff"); }
   }, { isActive: active || list.isLoading || detail.isLoading });
   const review = floor.review;
-  return <Box flexDirection="column" borderStyle={active ? "double" : "round"} borderColor={active ? "cyan" : "gray"} paddingX={1} minHeight={22}><Text bold color="cyan">/review · {status === "active" ? "Active" : "History"} · {capitalize(mode)}</Text>
+  return <Panel title={`/review · ${status === "active" ? "Active" : "History"} · ${capitalize(mode)}`} accent={ACCENT.review} active={active} minHeight={22} width="100%">
     {!review && !list.isLoading && (list.data?.items.length ?? 0) === 0 && <Text dimColor>No review available.</Text>}
-    {list.isLoading && !loadingStopped && <Text color="cyan">Loading review contributions… · Esc stops</Text>}{loadingStopped && !list.data && <Text color="yellow">Review loading stopped. Tab into Review and press r to retry.</Text>}{list.error && <Text color="red">{errorMessage(list.error)}</Text>}
-    {phase === "list" && mode === "files" && fileRows.slice(0, 18).map((row, index) => <Text key={`${row.runId}:${row.file.path}`} inverse={active && index === selected}>{row.file.changeKind.padEnd(9)} {row.file.path} <Text dimColor>+{row.file.additions} -{row.file.deletions} · {row.agentName}</Text></Text>)}
-    {phase === "list" && mode === "prompts" && (list.data?.items ?? []).slice(0, 18).map((item, index) => <Text key={item.runId} inverse={active && index === selected}>{shortId(item.runId)} · {item.agentName} · {item.prompts.map((prompt) => prompt.text).join(" / ").slice(0, 100)}</Text>)}
-    {phase === "files" && <><Text bold>{contribution?.prompts.map((prompt) => prompt.text).join(" / ") ?? "Loading prompt…"}</Text>{files.map((file, index) => <Text key={file.path} inverse={active && index === fileSelected}>{file.changeKind.padEnd(9)} {file.path} <Text dimColor>+{file.additions} -{file.deletions}</Text></Text>)}</>}
+    {list.isLoading && !loadingStopped && <Text color={ACCENT.review}>Loading review contributions… · Esc stops</Text>}{loadingStopped && !list.data && <Text color="yellow">Review loading stopped. Tab into Review and press r to retry.</Text>}{list.error && <Text color="red">{errorMessage(list.error)}</Text>}
+    {phase === "list" && mode === "files" && fileRows.slice(0, 18).map((row, index) => <Text key={`${row.runId}:${row.file.path}`} {...rowStyle(index === selected, active)}>{row.file.changeKind.padEnd(9)} {row.file.path} <Text dimColor>+{row.file.additions} -{row.file.deletions} · {row.agentName}</Text></Text>)}
+    {phase === "list" && mode === "prompts" && (list.data?.items ?? []).slice(0, 18).map((item, index) => <Text key={item.runId} {...rowStyle(index === selected, active)}>{shortId(item.runId)} · {item.agentName} · {item.prompts.map((prompt) => prompt.text).join(" / ").slice(0, 100)}</Text>)}
+    {phase === "files" && <><Text bold>{contribution?.prompts.map((prompt) => prompt.text).join(" / ") ?? "Loading prompt…"}</Text>{files.map((file, index) => <Text key={file.path} {...rowStyle(index === fileSelected, active)}>{file.changeKind.padEnd(9)} {file.path} <Text dimColor>+{file.additions} -{file.deletions}</Text></Text>)}</>}
     {phase === "diff" && <><Text bold>{diffFile?.path ?? "Loading diff…"} · wrap {wrap ? "on" : "off"}</Text>{diff.slice(offset, offset + 16).map((line, index) => <Text key={`${offset}:${index}`} color={line.type === "add" ? "green" : line.type === "remove" ? "red" : "white"}>{String(offset + index + 1).padStart(4)} {line.type === "add" ? "+" : line.type === "remove" ? "-" : " "} {wrap ? line.text : line.text.slice(0, 120)}</Text>)}</>}
-    <Text dimColor>{active ? "↑↓ select/scroll · Enter open · v Files/Prompts · h Active/History · w wrap · Esc back/prompt" : "Tab enters review · /exit returns to floor"}</Text>
-  </Box>;
+    <Text dimColor>{active ? "↑↓ select/scroll · Enter open · v Files/Prompts · h Active/History · w wrap · Esc back/prompt" : "Tab enters review · Esc Esc returns to the floor"}</Text>
+  </Panel>;
 }
 
 function SessionSettingsPage({ actions, sessionId, floor, owner, skills, mcp, active, focusPrompt, refresh, setNotice }: { actions: OpenFloorActions; sessionId: string; floor: FloorSnapshot; owner: boolean; skills: unknown; mcp: unknown; active: boolean; focusPrompt: () => void; refresh: () => void; setNotice: (message: string) => void }) {
@@ -563,25 +569,42 @@ function SessionSettingsPage({ actions, sessionId, floor, owner, skills, mcp, ac
     finally { setWorking(false); }
   };
   useInput((_input, key) => { if (key.escape) focusPrompt(); else if (key.upArrow) setSelected((value) => Math.max(0, value - 1)); else if (key.downArrow) setSelected((value) => Math.min(rows.length - 1, value + 1)); else if (key.return) void mutate(); }, { isActive: active });
-  return <Box flexDirection="column" borderStyle={active ? "double" : "round"} borderColor={active ? "cyan" : "gray"} paddingX={1} minHeight={22}><Text bold color="cyan">/settings</Text>
-    {rows.map((row, index) => <Text key={row.field} inverse={active && selected === index}>{row.label.padEnd(22)} {typeof row.value === "boolean" ? row.value ? "on" : "off" : PROVIDER_LABELS[provider]}</Text>)}
+  return <Panel title="/settings" accent={ACCENT.settings} active={active} minHeight={22} width="100%">
+    {rows.map((row, index) => <Text key={row.field} {...rowStyle(selected === index, active)}>{row.label.padEnd(22)} {typeof row.value === "boolean" ? <Text color={row.value ? "green" : IDLE}>{row.value ? "on" : "off"}</Text> : PROVIDER_LABELS[provider]}</Text>)}
     <Text>Skills: {recordArray(skills, "skills").length} · MCP servers: {recordArray(mcp, "servers").length}</Text>
-    <Text dimColor>{owner ? working ? "Saving…" : active ? "↑↓ select · Enter toggle/cycle · Esc returns to command bar" : "Tab enters settings · /exit returns to floor" : "Session settings are owner-only."}</Text>
-  </Box>;
+    <Text dimColor>{owner ? working ? "Saving…" : active ? "↑↓ select · Enter toggle/cycle · Esc returns to command bar" : "Tab enters settings · Esc Esc returns to the floor" : "Session settings are owner-only."}</Text>
+  </Panel>;
 }
 
-function CommandBar({ page, sessionId, actions, presence, focused, navigate, openCredentials, goSessions, refresh, retryWorkspaceSync, runBackground, sessionAction, logout, setNotice, history, exitApp }: { page: SessionPage; sessionId: string; actions: OpenFloorActions; presence?: PresenceClient; focused: boolean; navigate: (page: SessionPage) => void; openCredentials: () => void; goSessions: () => void; refresh: () => void; retryWorkspaceSync: () => void; runBackground: (line: string) => Promise<void>; sessionAction: (action: Exclude<SessionAction, "cancel">) => void; logout: () => Promise<void>; setNotice: (message: string) => void; history: HistoryBuffer; exitApp: () => void }) {
-  const { exit } = useApp(); const [value, setValue] = useState(""); const [selected, setSelected] = useState(0); const [inputKey, setInputKey] = useState(0);
-  const suggestions = value.startsWith("/") ? commandSuggestions(SESSION_COMMANDS, value) : [];
+function CommandBar({ page, sessionId, actions, presence, focused, agents, onMenu, navigate, openCredentials, goSessions, refresh, retryWorkspaceSync, runBackground, sessionAction, logout, setNotice, history, exitApp }: { page: SessionPage; sessionId: string; actions: OpenFloorActions; presence?: PresenceClient; focused: boolean; agents: FloorSnapshot["agents"]; onMenu: (open: boolean) => void; navigate: (page: SessionPage) => void; openCredentials: () => void; goSessions: () => void; refresh: () => void; retryWorkspaceSync: () => void; runBackground: (line: string) => Promise<void>; sessionAction: (action: Exclude<SessionAction, "cancel">) => void; logout: () => Promise<void>; setNotice: (message: string) => void; history: HistoryBuffer; exitApp: () => void }) {
+  const { exit } = useApp(); const [value, setValue] = useState(""); const [cursor, setCursor] = useState(0); const [selected, setSelected] = useState(0); const [inputKey, setInputKey] = useState(0); const [caret, setCaret] = useState<number | undefined>(undefined); const [menuHidden, setMenuHidden] = useState(false);
+  const escapeGesture = useEscapeGesture();
+  const mention = menuHidden ? null : mentionAt(value, cursor);
+  const mentionNames = mention ? rankNames(agents.map((agent) => agent.name), mention.query) : [];
+  const suggestions: Suggestion[] = mention
+    ? mentionNames.map((name) => { const agent = agents.find((item) => item.name === name)!; return { name: `@${name}`, description: `${agent.role} · ${agent.pausedAt ? "paused" : `${agent.provider}/${agent.model ?? "default"}`}` }; })
+    : !menuHidden && value.startsWith("/") ? commandSuggestions(SESSION_COMMANDS, value) : [];
   const activeSelection = Math.min(selected, Math.max(0, suggestions.length - 1));
-  const reset = () => { setValue(""); setSelected(0); setInputKey((current) => current + 1); presence?.sendDraft("", false); };
+  const menuOpen = focused && suggestions.length > 0;
+  useEffect(() => { onMenu(menuOpen); return () => onMenu(false); }, [menuOpen, onMenu]);
+  const rewrite = (next: string, nextCursor?: number) => { setValue(next); setCursor(nextCursor ?? next.length); setCaret(nextCursor); setSelected(0); setInputKey((current) => current + 1); };
+  /** Accepts the highlighted suggestion. Returns false when there is nothing to accept. */
+  const complete = (): boolean => {
+    if (!suggestions.length) return false;
+    if (mention) { const name = mentionNames[activeSelection]; if (!name) return false; const applied = applyMention(value, mention, name); rewrite(applied.value, applied.cursor); return true; }
+    const chosen = suggestions[activeSelection]!; const argument = value.trim().split(/\s+/).slice(1).join(" ");
+    rewrite(`${chosen.name}${argument ? ` ${argument}` : ""}`);
+    return true;
+  };
+  const back = () => { if (page === "floor") goSessions(); else navigate("floor"); };
+  const reset = () => { setValue(""); setCursor(0); setCaret(undefined); setSelected(0); setMenuHidden(false); setInputKey((current) => current + 1); presence?.sendDraft("", false); };
   const submit = async (raw: string) => {
     const text = raw.trim(); if (!text) return;
     history.push(text);
     if (text.startsWith("/")) {
       const [command = "", ...rest] = text.slice(1).split(/\s+/); const argument = rest.join(" ").trim();
       const exact = SESSION_COMMANDS.some((entry) => entry.name === `/${command}`) || command === "run";
-      if (!exact && suggestions[activeSelection]) { setValue(`${suggestions[activeSelection].name}${argument ? ` ${argument}` : ""}`); setInputKey((current) => current + 1); return; }
+      if (!exact && !mention && complete()) return;
       if (["floor", "overview", "settings"].includes(command)) navigate(command as SessionPage);
       else if (command === "review" && !argument) navigate("review");
       else if (command === "sessions") goSessions();
@@ -608,10 +631,28 @@ function CommandBar({ page, sessionId, actions, presence, focused, navigate, ope
     await actions.post(`/api/sessions/${sessionId}/queue`, { prompt: text, agentId: null }); setNotice("Prompt added to queue."); refresh(); reset();
   };
   useInput((input, key) => { if (key.ctrl && input === "d" && !value) exitApp(); }, { isActive: focused });
-  return <Box flexDirection="column">{focused && suggestions.length > 0 && <CommandSuggestions commands={suggestions} selected={activeSelection} />}<Box borderStyle={focused ? "double" : "round"} borderColor="cyan" paddingX={1}><Text color="cyan">{focused ? `${page} › ` : `${page} › `}</Text><EditableInput key={inputKey} value={value} active={focused} placeholder="Prompt agents or type /help" onUp={() => { if (suggestions.length > 0) { setSelected((current) => Math.max(0, current - 1)); return; } const previous = history.previous(value); if (previous != null) { setValue(previous); setInputKey((current) => current + 1); } }} onDown={() => { if (suggestions.length > 0) { setSelected((current) => Math.min(Math.max(0, suggestions.length - 1), current + 1)); return; } const next = history.next(); if (next != null) { setValue(next); setInputKey((current) => current + 1); } }} onEscape={reset} onChange={(next) => { setValue(next); setSelected(0); if (next.startsWith("/")) presence?.sendDraft("", false); else presence?.sendDraft(next); }} onSubmit={(next) => { void submit(next).catch((reason) => setNotice(errorMessage(reason))); }} /></Box></Box>;
+  return <Box flexDirection="column">
+    {menuOpen && <SuggestionList items={suggestions} selected={activeSelection} hint={mention ? "Tab or Enter completes the agent · Esc closes" : "Tab or Enter completes · Esc closes"} />}
+    <Box {...focusFrame(focused)} paddingX={1}>
+      <Text bold color={focused ? FOCUS : IDLE}>{page} › </Text>
+      <EditableInput key={inputKey} value={value} active={focused} {...(caret != null ? { initialCursor: caret } : {})} placeholder="Prompt agents, @mention one, or type /help"
+        onUp={() => { if (suggestions.length > 0) { setSelected((current) => Math.max(0, current - 1)); return; } const previous = history.previous(value); if (previous != null) rewrite(previous); }}
+        onDown={() => { if (suggestions.length > 0) { setSelected((current) => Math.min(Math.max(0, suggestions.length - 1), current + 1)); return; } const next = history.next(); if (next != null) rewrite(next); }}
+        onTab={() => { complete(); }}
+        onEscape={() => {
+          if (menuOpen) { setMenuHidden(true); return; }
+          escapeGesture(
+            () => setNotice(value ? "Press Esc again to clear the prompt." : page === "floor" ? "Press Esc again to return to Sessions." : "Press Esc again to return to the floor."),
+            () => { if (value) reset(); else back(); },
+          );
+        }}
+        onCursor={setCursor}
+        onChange={(next, nextCursor) => { setValue(next); setCursor(nextCursor); setCaret(undefined); setSelected(0); setMenuHidden(false); if (next.startsWith("/")) presence?.sendDraft("", false); else presence?.sendDraft(next); }}
+        onSubmit={(next) => { if (mention && mentionNames.length && !mentionNames.includes(mention.query)) { complete(); return; } void submit(next).catch((reason) => setNotice(errorMessage(reason))); }} />
+    </Box>
+  </Box>;
 }
 
-type CommandSpec = { name: string; description: string };
 const HOME_COMMANDS: readonly CommandSpec[] = [
   { name: "/new", description: "create session" }, { name: "/archive", description: "archive selected session" }, { name: "/unarchive", description: "unarchive selected session" }, { name: "/delete", description: "delete selected session (owner)" }, { name: "/leave", description: "leave selected session" }, { name: "/settings", description: "CLI settings" }, { name: "/credentials", description: "AI credentials" }, { name: "/account", description: "browser account settings" }, { name: "/help", description: "keyboard help" }, { name: "/logout", description: "remove CLI login" }, { name: "/sessions", description: "session list" }, { name: "/refresh", description: "reload sessions" }, { name: "/exit", description: "quit" }, { name: "/quit", description: "quit" },
 ];
@@ -623,9 +664,12 @@ const BACKGROUND_DEFAULTS: Record<string, string | undefined> = { invite: "show"
 
 function HomeCommandBar({ active, setActive, page, submit, setNotice, history, exitApp }: { active: boolean; setActive: (active: boolean) => void; page: "sessions" | "cli-settings" | "cli-help"; submit: (value: string) => Promise<void>; setNotice: (message: string) => void; history: HistoryBuffer; exitApp: () => void }) {
   const [value, setValue] = useState(""); const [selected, setSelected] = useState(0); const [inputKey, setInputKey] = useState(0);
+  const escapeGesture = useEscapeGesture();
   const suggestions = commandSuggestions(HOME_COMMANDS, value || "/");
   const activeSelection = Math.min(selected, Math.max(0, suggestions.length - 1));
   const reset = () => { setActive(false); setValue(""); setSelected(0); setInputKey((current) => current + 1); };
+  const rewrite = (next: string) => { setValue(next); setSelected(0); setInputKey((current) => current + 1); };
+  const complete = (): boolean => { const chosen = suggestions[activeSelection]; if (!chosen) return false; rewrite(chosen.name); return true; };
   useInput((input, key) => {
     if (!active) {
       if (input === "/" || (key.ctrl && input === "k")) { setValue("/"); setSelected(0); setInputKey((current) => current + 1); setActive(true); }
@@ -636,19 +680,28 @@ function HomeCommandBar({ active, setActive, page, submit, setNotice, history, e
   const execute = async (raw: string) => {
     const trimmed = raw.trim();
     const token = trimmed.split(/\s/, 1)[0] ?? ""; const exact = HOME_COMMANDS.some((entry) => entry.name === token) || token === "/run";
-    if (!exact && suggestions[activeSelection]) { setValue(suggestions[activeSelection].name); setInputKey((current) => current + 1); return; }
+    if (!exact && complete()) return;
     if (!trimmed.startsWith("/")) { setNotice("Commands start with /. Press / to open commands."); return; }
     history.push(trimmed);
     try { await submit(trimmed); reset(); }
     catch (reason) { setNotice(sanitizeTerminal(reason instanceof Error ? reason.message : String(reason)).slice(-240)); }
   };
   const label = page === "sessions" ? "sessions" : page === "cli-settings" ? "settings" : "help";
-  return <Box flexDirection="column">{active && suggestions.length > 0 && <CommandSuggestions commands={suggestions} selected={activeSelection} />}<Box borderStyle={active ? "double" : "round"} borderColor="cyan" paddingX={1}><Text color="cyan">{label} › </Text><EditableInput key={inputKey} value={value} active={active} placeholder="Type / for commands" onEscape={reset} onUp={() => { if (suggestions.length > 0) { setSelected((current) => Math.max(0, current - 1)); return; } const previous = history.previous(value); if (previous != null) { setValue(previous); setInputKey((current) => current + 1); } }} onDown={() => { if (suggestions.length > 0) { setSelected((current) => Math.min(Math.max(0, suggestions.length - 1), current + 1)); return; } const next = history.next(); if (next != null) { setValue(next); setInputKey((current) => current + 1); } }} onChange={(next) => { setValue(next); setSelected(0); }} onSubmit={(raw) => { void execute(raw); }} /></Box></Box>;
-}
-
-function CommandSuggestions({ commands, selected }: { commands: readonly CommandSpec[]; selected: number }) {
-  const start = Math.max(0, Math.min(selected - 4, Math.max(0, commands.length - 9)));
-  return <Box flexDirection="column" paddingX={1}>{commands.slice(start, start + 9).map((command, visibleIndex) => { const index = start + visibleIndex; return <Text key={command.name} inverse={index === selected} {...(index === selected ? { color: "cyan" as const } : {})}>{index === selected ? "›" : " "} {command.name.padEnd(16)} <Text dimColor>{command.description}</Text></Text>; })}</Box>;
+  return <Box flexDirection="column">
+    {active && suggestions.length > 0 && <SuggestionList items={suggestions} selected={activeSelection} hint="Tab or Enter completes · Esc twice closes commands" />}
+    <Box {...focusFrame(active)} paddingX={1}>
+      <Text bold color={active ? FOCUS : IDLE}>{label} › </Text>
+      <EditableInput key={inputKey} value={value} active={active} placeholder="Type / for commands"
+        onEscape={() => { const typed = value.trim() !== "" && value.trim() !== "/"; escapeGesture(
+          () => setNotice(typed ? "Press Esc again to clear the command bar." : "Press Esc again to close commands."),
+          () => { if (typed) rewrite("/"); else reset(); },
+        ); }}
+        onTab={() => { complete(); }}
+        onUp={() => { if (suggestions.length > 0) { setSelected((current) => Math.max(0, current - 1)); return; } const previous = history.previous(value); if (previous != null) rewrite(previous); }}
+        onDown={() => { if (suggestions.length > 0) { setSelected((current) => Math.min(Math.max(0, suggestions.length - 1), current + 1)); return; } const next = history.next(); if (next != null) rewrite(next); }}
+        onChange={(next) => { setValue(next); setSelected(0); }} onSubmit={(raw) => { void execute(raw); }} />
+    </Box>
+  </Box>;
 }
 
 type AgentStage = "name" | "role" | "task" | "owner" | "provider" | "credential" | "model" | "confirm" | "submitting" | "error";
@@ -671,7 +724,7 @@ function CreateAgentPage({ actions, sessionId, members, close, completed }: { ac
     else if (count && key.return) setStage(stage === "owner" ? "provider" : stage === "provider" ? "credential" : stage === "credential" ? "model" : "confirm");
     else if (stage === "confirm" && key.return) void submit();
   }, { isActive: !["name", "role", "task"].includes(stage) });
-  return <PageFrame title="Create agent">
+  return <PageFrame title="Create agent" accent={ACCENT.create}>
     {stage === "name" && <><Text>Name</Text><EditableInput key={stage} value={name} onChange={(value) => setName(value.slice(0, 80))} placeholder="Builder" onEscape={back} onSubmit={(value) => { if (value.trim()) setStage("role"); }} /></>}
     {stage === "role" && <><Text>Role</Text><EditableInput key={stage} value={role} onChange={(value) => setRole(value.slice(0, 120))} placeholder="Software engineer" onEscape={back} onSubmit={(value) => { if (value.trim()) setStage("task"); }} /></>}
     {stage === "task" && <><Text>Task</Text><EditableInput key={stage} value={task} onChange={(value) => setTask(value.slice(0, 500))} placeholder="What should this agent own?" onEscape={back} onSubmit={(value) => { if (value.trim()) setStage("owner"); }} /></>}
@@ -679,8 +732,8 @@ function CreateAgentPage({ actions, sessionId, members, close, completed }: { ac
     {stage === "provider" && <ChoiceList title="Provider" values={PROVIDERS.map((value) => PROVIDER_LABELS[value])} selected={provider} />}
     {stage === "credential" && <ChoiceList title="Credential" values={kinds.map((value) => credentialLabel(selectedProvider, value))} selected={kind} />}
     {stage === "model" && <ChoiceList title="Model" values={models.map((value) => value ?? "Provider default")} selected={model} />}
-    {stage === "confirm" && <><Text bold>{name}</Text><Text>{role}: {task}</Text><Text>Owner: {members[owner]?.displayName}</Text><Text>Provider: {PROVIDER_LABELS[selectedProvider]} · {credentialLabel(selectedProvider, kinds[kind]!)}</Text><Text>Model: {models[model] ?? "Provider default"}</Text><Text color="cyan">Enter creates once · Esc goes back</Text></>}
-    {stage === "submitting" && <Text color="cyan">Creating agent…</Text>}
+    {stage === "confirm" && <><Text bold>{name}</Text><Text>{role}: {task}</Text><Text>Owner: {members[owner]?.displayName}</Text><Text>Provider: {PROVIDER_LABELS[selectedProvider]} · {credentialLabel(selectedProvider, kinds[kind]!)}</Text><Text>Model: {models[model] ?? "Provider default"}</Text><Text color={FOCUS}>Enter creates once · Esc goes back</Text></>}
+    {stage === "submitting" && <Text color={statusColor("running")}>Creating agent…</Text>}
     {stage === "error" && <><Text color="red">{error}</Text><Text>Creation was not retried because mutation outcome may be unknown.</Text><Text dimColor>Esc returns to floor; refresh before trying again.</Text></>}
   </PageFrame>;
 }
@@ -708,14 +761,14 @@ function CredentialsPage({ actions, close, setNotice }: { actions: OpenFloorActi
     if (stage === "confirm-disconnect") { if (key.escape) setStage("list"); else if (key.return) void disconnect(); return; }
     if (stage === "error" && key.escape) { attempted.current = false; setError(null); setStage("list"); }
   }, { isActive: stage !== "secret" && stage !== "working" });
-  return <PageFrame title="AI credentials">
+  return <PageFrame title="AI credentials" accent={ACCENT.credentials}>
     <Text>Write-only connection flow. Secrets never enter shell history, config, logs, drafts, or rendered output.</Text>
-    {credentials.isLoading && <Text color="cyan">Loading credential status… · Esc stops and returns</Text>}{credentials.error && <Text color="red">{errorMessage(credentials.error)}</Text>}
-    {stage === "list" && options.map((item, index) => { const found = credentials.data?.credentials.find((credential) => credential.provider === item.provider && credential.kind === item.kind); return <Text key={`${item.provider}:${item.kind}`} inverse={index === selected}>{credentialLabel(item.provider, item.kind).padEnd(28)} {found ? `Connected ····${found.fingerprint}${found.validatedAt ? "" : " · not yet verified"}` : "Not connected"}</Text>; })}
+    {credentials.isLoading && <Text color={statusColor("running")}>Loading credential status… · Esc stops and returns</Text>}{credentials.error && <Text color="red">{errorMessage(credentials.error)}</Text>}
+    {stage === "list" && options.map((item, index) => { const found = credentials.data?.credentials.find((credential) => credential.provider === item.provider && credential.kind === item.kind); return <Text key={`${item.provider}:${item.kind}`} {...rowStyle(index === selected)}>{credentialLabel(item.provider, item.kind).padEnd(28)} {found ? `Connected ····${found.fingerprint}${found.validatedAt ? "" : " · not yet verified"}` : "Not connected"}</Text>; })}
     {stage === "secret" && <><Text bold>{credentialLabel(option.provider, option.kind)}</Text><Text>{option.provider === "openai" && option.kind === "oauth" ? "Paste complete auth.json. Ctrl+J inserts newline." : "Paste credential."}</Text><EditableInput value={secret} onChange={setSecret} secret multiline={option.provider === "openai" && option.kind === "oauth"} placeholder="Secret hidden" onEscape={() => { clearSecret(); setStage("list"); }} onSubmit={(value) => { if (value.trim()) setStage("confirm-connect"); }} /></>}
-    {stage === "confirm-connect" && <><Text>Connect {credentialLabel(option.provider, option.kind)}?</Text><Text>Secret is hidden and will be sent directly to openfloor for encrypted storage.</Text><Text color="cyan">Enter connects once · Esc cancels</Text></>}
-    {stage === "confirm-disconnect" && <><Text>Disconnect {credentialLabel(option.provider, option.kind)} ending ····{existing?.fingerprint}?</Text><Text color="cyan">Enter disconnects · Esc cancels</Text></>}
-    {stage === "working" && <Text color="cyan">Updating credential…</Text>}
+    {stage === "confirm-connect" && <><Text>Connect {credentialLabel(option.provider, option.kind)}?</Text><Text>Secret is hidden and will be sent directly to openfloor for encrypted storage.</Text><Text color={FOCUS}>Enter connects once · Esc cancels</Text></>}
+    {stage === "confirm-disconnect" && <><Text>Disconnect {credentialLabel(option.provider, option.kind)} ending ····{existing?.fingerprint}?</Text><Text color={FOCUS}>Enter disconnects · Esc cancels</Text></>}
+    {stage === "working" && <Text color={statusColor("running")}>Updating credential…</Text>}
     {stage === "error" && <><Text color="red">{error}</Text><Text>Mutation was not retried automatically.</Text><Text dimColor>Esc returns to credential status.</Text></>}
     {stage === "list" && <Text dimColor>↑↓ select · Enter connect/disconnect · Esc returns</Text>}
   </PageFrame>;
@@ -724,7 +777,7 @@ function CredentialsPage({ actions, close, setNotice }: { actions: OpenFloorActi
 function BindWorkspaceConfirm({ workspace, repositoryName, branch, sha, close, confirm }: { workspace: LocalWorkspace; repositoryName: string; branch: string; sha: string; close: () => void; confirm: () => Promise<void> }) {
   const [working, setWorking] = useState(false); const [error, setError] = useState<string | null>(null);
   useInput((input, key) => { if (working) return; if (key.escape || input.toLowerCase() === "n") close(); else if (key.return || input.toLowerCase() === "y") { setWorking(true); setError(null); void confirm().then(close, (reason) => { setWorking(false); setError(reason instanceof Error ? reason.message : String(reason)); }); } });
-  return <PageFrame title="Enable local live sync?"><Text>Repository: {repositoryName}</Text><Text>Directory: {workspace.root}</Text><Text>Candidate: {branch}</Text><Text>Expected SHA: {sha}</Text><Text color="yellow">Clean checkout will switch to this candidate branch and receive fast-forward updates. Local edits are never uploaded.</Text>{error && <Text color="red">{error}</Text>}<Text color="cyan">{working ? "Checking workspace…" : "Enter/y confirms · Esc/n keeps local sync off"}</Text></PageFrame>;
+  return <PageFrame title="Enable local live sync?" accent={ACCENT.workspace}><Text>Repository: {repositoryName}</Text><Text>Directory: {workspace.root}</Text><Text>Candidate: {branch}</Text><Text>Expected SHA: {sha}</Text><Text color="yellow">Clean checkout will switch to this candidate branch and receive fast-forward updates. Local edits are never uploaded.</Text>{error && <Text color="red">{error}</Text>}<Text color={working ? ACCENT.workspace : FOCUS}>{working ? "Checking workspace…" : "Enter/y confirms · Esc/n keeps local sync off"}</Text></PageFrame>;
 }
 
 type CreateStage = "loading" | "empty" | "title" | "objective" | "candidate" | "repository" | "repository-search" | "confirm" | "submitting" | "load-error" | "preflight-error" | "mutation-error" | "provision-failed";
@@ -734,16 +787,16 @@ function CreateSessionWizard({ actions, baseUrl, close, workspace, onCreated }: 
   const filtered = repositories.filter((repository) => repository.fullName.toLowerCase().includes(search.trim().toLowerCase())); const selected = repositories[selectedRepository];
   const submit = async () => { if (!selected || submitted.current) return; submitted.current = true; setError(null); setStage("submitting"); if (workspace) { try { await requireCleanWorkspace(workspace); } catch (reason) { submitted.current = false; setError(reason instanceof Error ? reason.message : String(reason)); setStage("preflight-error"); return; } } try { const created = await actions.createSession({ title: title.trim(), objective: objective.trim() || null, candidateName: candidateName.trim() || title.trim(), repositoryId: selected.id, accountInstallationId: selected.accountInstallationId }); const ready = created.setupStatus === "ready"; const message = ready ? "Session created." : created.setupError ?? "Session created, but repository setup needs attention."; if (!ready) { setError(message); setStage("provision-failed"); } onCreated(created.session.id, ready, message); } catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); setStage("mutation-error"); } };
   useInput((input, key) => { if (stage === "repository") { if (key.upArrow) setSelectedRepository((value) => Math.max(0, value - 1)); else if (key.downArrow) setSelectedRepository((value) => Math.min(repositories.length - 1, value + 1)); else if (input.toLowerCase() === "s") { setSearch(""); setStage("repository-search"); } else if (key.return && selected) setStage("confirm"); else if (key.escape) setStage("candidate"); return; } if (stage === "confirm") { if (key.return) void submit(); else if (key.escape) setStage("repository"); return; } if (stage === "empty" && key.return) { void open(`${baseUrl}/home/settings?section=connections`); return; } if (stage === "load-error" && input.toLowerCase() === "r") { setError(null); setStage("loading"); setLoadAttempt((value) => value + 1); return; } if (stage === "preflight-error" && input.toLowerCase() === "r") { setError(null); setStage("confirm"); return; } if (!key.escape) return; if (stage === "objective") setStage("title"); else if (stage === "candidate") setStage("objective"); else if (stage === "repository-search") setStage("repository"); else if (stage !== "submitting") close(); });
-  return <PageFrame title={workspace ? `New local session · ${workspace.repositoryFullName}` : "New session"}>
-    {stage === "loading" && <Text color="cyan">Loading GitHub repositories… · Esc stops and returns</Text>}
+  return <PageFrame title={workspace ? `New local session · ${workspace.repositoryFullName}` : "New session"} accent={ACCENT.create}>
+    {stage === "loading" && <Text color={statusColor("running")}>Loading GitHub repositories… · Esc stops and returns</Text>}
     {stage === "empty" && <><Text>{workspace ? `${workspace.repositoryFullName} is not available to openfloor.` : "No repositories available."}</Text><Text>Press Enter to update GitHub access.</Text></>}
     {stage === "title" && <><Text>Task</Text><EditableInput key={stage} value={title} onChange={(value) => setTitle(value.slice(0, 100))} placeholder="What is this session for?" onSubmit={(value) => { const next = value.trim(); if (next) { setTitle(next); setCandidateName(next); setStage("objective"); } }} /></>}
     {stage === "objective" && <><Text>Goal <Text dimColor>(optional)</Text></Text><EditableInput key={stage} value={objective} onChange={(value) => setObjective(value.slice(0, 2_000))} placeholder="Press Enter to skip" onSubmit={() => setStage("candidate")} /></>}
     {stage === "candidate" && <><Text>Candidate branch name</Text><EditableInput key={stage} value={candidateName} onChange={(value) => setCandidateName(value.slice(0, 100))} placeholder={title} onSubmit={(value) => { setCandidateName((value.trim() || title).slice(0, 100)); setStage("repository"); }} /></>}
-    {stage === "repository" && <><Text>Select repository</Text>{repositories.map((repository, index) => <Text key={`${repository.accountInstallationId}:${repository.id}`} inverse={index === selectedRepository} {...(index === selectedRepository ? { color: "cyan" as const } : {})}>{index === selectedRepository ? "›" : " "} {repository.fullName} · {repository.defaultBranch}</Text>)}<Text dimColor>↑↓ select · s search · Enter continue</Text></>}
-    {stage === "repository-search" && <><Text>Search repositories</Text><EditableInput value={search} placeholder="owner/repository" onChange={setSearch} onSubmit={() => { const first = filtered[0]; if (first) { setSelectedRepository(repositories.indexOf(first)); setStage("repository"); } }} />{filtered.slice(0, 6).map((repository, index) => <Text key={repository.id} {...(index === 0 ? { color: "cyan" as const } : {})}>{index === 0 ? "›" : " "} {repository.fullName}</Text>)}</>}
-    {stage === "confirm" && selected && <><Text bold>{title}</Text><Text>{objective || "No goal provided"}</Text><Text>Repository: {selected.fullName}</Text><Text>Candidate: {candidateName || title}</Text>{workspace && <Text color="yellow">Creation requires a clean worktree. It will switch to the server candidate branch, then receive fast-forward updates. Local edits are never uploaded.</Text>}<Text color="cyan">Press Enter to create once. Esc goes back.</Text></>}
-    {stage === "submitting" && <Text color="cyan">Creating session and candidate branch…</Text>}
+    {stage === "repository" && <><Text>Select repository</Text>{repositories.map((repository, index) => <Text key={`${repository.accountInstallationId}:${repository.id}`} {...rowStyle(index === selectedRepository)}>{index === selectedRepository ? "›" : " "} {repository.fullName} · {repository.defaultBranch}</Text>)}<Text dimColor>↑↓ select · s search · Enter continue</Text></>}
+    {stage === "repository-search" && <><Text>Search repositories</Text><EditableInput value={search} placeholder="owner/repository" onChange={setSearch} onSubmit={() => { const first = filtered[0]; if (first) { setSelectedRepository(repositories.indexOf(first)); setStage("repository"); } }} />{filtered.slice(0, 6).map((repository, index) => <Text key={repository.id} {...(index === 0 ? { color: FOCUS } : {})}>{index === 0 ? "›" : " "} {repository.fullName}</Text>)}</>}
+    {stage === "confirm" && selected && <><Text bold>{title}</Text><Text>{objective || "No goal provided"}</Text><Text>Repository: {selected.fullName}</Text><Text>Candidate: {candidateName || title}</Text>{workspace && <Text color="yellow">Creation requires a clean worktree. It will switch to the server candidate branch, then receive fast-forward updates. Local edits are never uploaded.</Text>}<Text color={FOCUS}>Press Enter to create once. Esc goes back.</Text></>}
+    {stage === "submitting" && <Text color={statusColor("running")}>Creating session and candidate branch…</Text>}
     {stage === "load-error" && <><Text color="red">{error ?? "Unable to load repositories."}</Text><Text dimColor>Press r to retry or Esc to close.</Text></>}
     {stage === "preflight-error" && <><Text color="red">{error ?? "Local workspace is not ready."}</Text><Text dimColor>Fix the worktree, then press r to check again or Esc to close.</Text></>}
     {stage === "mutation-error" && <><Text color="red">{error ?? "Unable to create session."}</Text><Text>Creation is not retried because the server outcome may be unknown.</Text><Text dimColor>Esc returns to Sessions so you can refresh before trying again.</Text></>}
@@ -751,7 +804,7 @@ function CreateSessionWizard({ actions, baseUrl, close, workspace, onCreated }: 
   </PageFrame>;
 }
 
-function LoadingView({ message, escape }: { message: string; escape: string }) { return <Box flexDirection="column"><Text color="cyan">{message}</Text><Text dimColor>{escape}</Text></Box>; }
+function LoadingView({ message, escape }: { message: string; escape: string }) { return <Box flexDirection="column"><Text color={statusColor("running")}>{message}</Text><Text dimColor>{escape}</Text></Box>; }
 function SessionLoadError({ error }: { error: unknown }) { return <Box flexDirection="column"><Text color="red" bold>Unable to load session floor</Text><Text>{errorMessage(error)}</Text><Text dimColor>Esc returns to Sessions · r retries</Text></Box>; }
 function ErrorView({ error }: { error: unknown }) { return <Box flexDirection="column"><Text color="red" bold>Unable to load openfloor</Text><Text>{sanitizeTerminal(error instanceof Error ? error.message : String(error))}</Text><Text dimColor>Run openfloor auth login or openfloor doctor.</Text></Box>; }
 function appendActivity(current: Record<string, Array<{ sequence: number; kind: string; detail: string }>>, runId: string, events: Array<{ sequence: number; kind: string; detail: string }>) { const all = [...(current[runId] ?? []), ...events].sort((left, right) => left.sequence - right.sequence); return { ...current, [runId]: all.filter((item, index) => index === 0 || item.sequence !== all[index - 1]!.sequence).slice(-100) }; }
@@ -776,26 +829,11 @@ function recordArray(value: unknown, ...keys: string[]): Array<Record<string, un
 function sessionGroup(session: SessionSummary): number { return session.endedAt != null ? 2 : session.archivedAt != null ? 1 : 0; }
 function isSessionPage(page: Page): page is SessionPage { return ["floor", "overview", "review", "settings", "help"].includes(page); }
 function isHomePage(page: Page): page is "sessions" | "cli-settings" | "cli-help" { return ["sessions", "cli-settings", "cli-help"].includes(page); }
-function statusColor(status: string): "green" | "yellow" | "red" | "cyan" | "white" { if (["completed", "integrated", "ready", "passed"].includes(status)) return "green"; if (["failed", "cancelled", "conflicted"].includes(status)) return "red"; if (["running", "publishing", "integrating"].includes(status)) return "cyan"; if (["paused", "queued", "pending", "awaiting_input"].includes(status)) return "yellow"; return "white"; }
 function capitalize(value: string): string { return `${value[0]?.toUpperCase() ?? ""}${value.slice(1)}`; }
-function commandSuggestions(commands: readonly CommandSpec[], value: string): CommandSpec[] {
-  const token = (value.split(/\s/, 1)[0] || "/").toLowerCase();
-  if (token === "/") return [...commands];
-  const prefix = commands.filter((command) => command.name.toLowerCase().startsWith(token));
-  const needle = token.slice(1);
-  const fuzzy = commands.filter((command) => !prefix.includes(command) && needle && isSubsequence(needle, command.name.slice(1).toLowerCase()));
-  return [...prefix, ...fuzzy];
-}
-function isSubsequence(needle: string, haystack: string): boolean {
-  let index = 0;
-  for (const char of haystack) { if (char === needle[index]) index += 1; if (index === needle.length) return true; }
-  return needle.length === 0;
-}
-function noticeColor(tone: NoticeTone): "cyan" | "green" | "yellow" | "red" { return tone === "success" ? "green" : tone === "warn" ? "yellow" : tone === "error" ? "red" : "cyan"; }
 function hintFor(page: Page, hasSession: boolean, floorFocus: "prompt" | FloorPane, pagePanelFocused: boolean): string {
   if (!hasSession) return page === "sessions" ? "↑↓ select · Enter open · n new · a session actions · / commands · Ctrl+C twice or Ctrl+D exits" : "Esc: back to Sessions";
-  if (page === "floor") return floorFocus === "prompt" ? "Tab: change panel · /: commands · Ctrl+C twice or Ctrl+D exits" : "Tab: change panel · arrows: move · Enter: open · Esc: prompt";
-  return pagePanelFocused ? "Esc: returns to command bar" : "Tab: focus this page · /exit: back to floor";
+  if (page === "floor") return floorFocus === "prompt" ? "@: mention an agent · /: commands · Tab: change panel · Esc Esc: back to Sessions · Ctrl+C twice or Ctrl+D exits" : "Tab: change panel · arrows: move · Enter: open · Esc: prompt";
+  return pagePanelFocused ? "Esc: returns to command bar" : "Tab: focus this page · Esc Esc: back to floor";
 }
 function teamMessages(floor: FloorSnapshot) { return floor.messages.filter((message) => !recordText(message, "recipientUserId")); }
 const TERMINAL_QUEUE_STATUSES = new Set(["completed", "failed", "cancelled", "canceled", "integrated", "rolled_back", "discarded", "answered"]);
