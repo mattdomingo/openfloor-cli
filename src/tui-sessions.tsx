@@ -4,7 +4,8 @@ import type { OpenFloorActions } from "./actions.js";
 import type { SessionSummary } from "./contracts.js";
 import { OpenFloorError } from "./errors.js";
 import { shortId } from "./id.js";
-import { errorMessage, PageFrame } from "./tui-shared.js";
+import { errorMessage, PageFrame, rowStyle } from "./tui-shared.js";
+import { ACCENT, FOCUS } from "./theme.js";
 
 export type SessionAction = "archive" | "unarchive" | "delete" | "leave" | "cancel";
 
@@ -23,9 +24,9 @@ export function SessionActionsPage({ session, onSelect, close }: { session: Sess
     else if (key.downArrow) setSelected((value) => Math.min(rows.length - 1, value + 1));
     else if (key.return) { const row = rows[selected]!; if (row.action === "cancel") close(); else onSelect(row.action); }
   });
-  return <PageFrame title={`Session actions · ${session.title}`}>
+  return <PageFrame title={`Session actions · ${session.title}`} accent={ACCENT.sessions}>
     <Text dimColor>{shortId(session.id)} · {session.role}{archived ? " · archived" : ""}{session.endedAt != null ? " · ended" : ""}</Text>
-    {rows.map((row, index) => <Text key={row.action} inverse={index === selected} {...(index === selected ? { color: "cyan" as const } : {})}>{index === selected ? "›" : " "} {row.label}</Text>)}
+    {rows.map((row, index) => <Text key={row.action} {...rowStyle(index === selected)}>{index === selected ? "›" : " "} {row.label}</Text>)}
     <Text dimColor>↑↓ select · Enter choose · Esc cancel</Text>
   </PageFrame>;
 }
@@ -96,19 +97,19 @@ export function ConfirmSessionRemoval({ session, actions, mode, close, onRemoved
     }
   });
 
-  return <PageFrame title={mode === "delete" ? "Delete session" : "Leave session"}>
+  return <PageFrame title={mode === "delete" ? "Delete session" : "Leave session"} accent={ACCENT.danger}>
     {stage === "confirm" && <><Text bold>{session.title}</Text>{mode === "delete"
       ? <Text color="yellow">This permanently removes the session for every member: floor, queue, messages, and repository connection. It cannot be undone.</Text>
       : <Text color="yellow">You will lose access to this session's floor, queue, and messages.</Text>}
-      <Text color="cyan">{mode === "delete" ? "Enter deletes once" : "Enter leaves once"} · Esc cancels</Text></>}
-    {stage === "working" && <Text color="cyan">{mode === "delete" ? "Deleting session…" : "Leaving session…"}</Text>}
+      <Text color={FOCUS}>{mode === "delete" ? "Enter deletes once" : "Enter leaves once"} · Esc cancels</Text></>}
+    {stage === "working" && <Text color="yellow">{mode === "delete" ? "Deleting session…" : "Leaving session…"}</Text>}
     {stage === "candidate" && block?.kind === "candidate_live" && <>
       <Text>The candidate branch <Text bold>{block.branch}</Text> hasn't merged yet. Decide what happens to it before the session is deleted.</Text>
-      <Text color="cyan">o Leave branch, delete session{block.canDeleteBranch ? " · d Delete branch and session" : ""}</Text>
+      <Text color={FOCUS}>o Leave branch, delete session{block.canDeleteBranch ? " · d Delete branch and session" : ""}</Text>
       <Text dimColor>Esc cancels</Text></>}
     {stage === "branch-failed" && block?.kind === "branch_delete_failed" && <>
       <Text color="red">Couldn't delete {block.branch} on GitHub. The session was not deleted.</Text>
-      <Text color="cyan">r Try again · o Leave branch, delete session</Text>
+      <Text color={FOCUS}>r Try again · o Leave branch, delete session</Text>
       <Text dimColor>Esc cancels</Text></>}
     {stage === "blocked" && block?.kind === "run_blocked" && <>
       <Text color="red">Run {shortId(block.runId)} is still integrating.</Text>

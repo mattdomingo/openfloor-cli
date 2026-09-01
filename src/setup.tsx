@@ -11,6 +11,7 @@ import { accessToken } from "./auth.js";
 import { ApiClient } from "./client.js";
 import { CURRENT_SETUP_VERSION, isLoopback, updateConfig } from "./config.js";
 import { OpenFloorError } from "./errors.js";
+import { BRAND, FOCUS, IDLE, statusColor } from "./theme.js";
 import { EditableInput } from "./tui-input.js";
 
 const execFile = promisify(execFileCallback);
@@ -198,14 +199,14 @@ export function SetupWizard({ baseUrl, debug, onComplete, onCancel }: SetupWizar
   }, { isActive: !stage.startsWith("profile") });
 
   if (stage === "splash") return <Splash tick={tick} width={stdout.columns || 80} />;
-  return <Box flexDirection="column" borderStyle="round" borderColor="cyan" paddingX={2} paddingY={1}>
-    <Text bold color="cyan">openfloor setup</Text>
+  return <Box flexDirection="column" borderStyle="round" borderColor={IDLE} paddingX={2} paddingY={1}>
+    <Text bold color={BRAND}>openfloor setup</Text>
     <Text>{message}</Text>
     {stage === "profile-first" && <><Text>First name</Text><EditableInput key={stage} value={firstName} onChange={(value) => setFirstName(value.slice(0, 80))} placeholder="First name" onEscape={() => { onCancel(); exit(); }} onSubmit={(value) => { if (value.trim()) setStage("profile-last"); }} /></>}
     {stage === "profile-last" && <><Text>Last name</Text><EditableInput key={stage} value={lastName} onChange={(value) => setLastName(value.slice(0, 80))} placeholder="Last name" onEscape={() => setStage("profile-first")} onSubmit={(value) => { if (value.trim()) setStage("profile-github"); }} /></>}
     {stage === "profile-github" && <><Text>GitHub handle <Text dimColor>(optional)</Text></Text><EditableInput key={stage} value={githubHandle} onChange={(value) => setGithubHandle(value.replace(/^@/, "").slice(0, 80))} placeholder="username" onEscape={() => setStage("profile-last")} onSubmit={() => { void beginGithub(); }} /></>}
-    {stage === "github-device" && device && <><Text>Open: {device.verificationUri}</Text><Text bold color="cyan">Code: {device.userCode}</Text><Text>Waiting for GitHub authorization…</Text><Text dimColor>The browser approves access; openfloor never stores your GitHub user token.</Text></>}
-    {(stage === "checking" || stage === "installing" || stage === "authenticating") && <Text color="cyan">{spinner(tick)} Working…</Text>}
+    {stage === "github-device" && device && <><Text>Open: {device.verificationUri}</Text><Text bold color={FOCUS}>Code: {device.userCode}</Text><Text>Waiting for GitHub authorization…</Text><Text dimColor>The browser approves access; openfloor never stores your GitHub user token.</Text></>}
+    {(stage === "checking" || stage === "installing" || stage === "authenticating") && <Text color={statusColor("running")}>{spinner(tick)} Working…</Text>}
     {stage === "error" && <Text color="red">Press r to retry or q to quit.</Text>}
     {stage === "instructions" && <Text dimColor>Press Enter to open instructions or q to quit.</Text>}
   </Box>;
