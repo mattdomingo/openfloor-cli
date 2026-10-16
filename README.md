@@ -2,6 +2,18 @@
 
 Keyboard-first CLI and TUI for [openfloor](https://github.com/mattdomingo/openfloor), licensed under [Apache 2.0](LICENSE).
 
+## Screenshots
+
+The session floor keeps team chat, agents, and queued prompts visible beside a keyboard-driven command bar.
+
+![openfloor terminal client showing team chat, Builder and Reviewer agents, and two queued prompts](docs/images/agent-floor.png)
+
+Choose a shared workspace from Sessions, then press Enter to open its floor.
+
+![openfloor terminal session list showing the release coordination workspace](docs/images/sessions.png)
+
+Captured from the compiled CLI running in a real terminal in the cloud, connected to the locally running openfloor Worker. The disposable test session is also shown in the [web app screenshots](https://github.com/mattdomingo/openfloor#screenshots). No live agent execution is depicted. See [screenshot provenance](docs/images/README.md).
+
 ## Requirements
 
 - Node.js 22.13 or newer
