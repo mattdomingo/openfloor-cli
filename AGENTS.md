@@ -1,6 +1,6 @@
 # openfloor CLI Engineering Guide
 
-This repository owns the private `openfloor` command-line and terminal client. Agent execution remains remote: openfloor's Worker, D1, Durable Objects, Workflows, Sandbox, R2, and GitHub integration remain authoritative. A local Git bridge may materialize the authoritative candidate in a user's existing clone.
+This repository owns the `openfloor` command-line and terminal client. Agent execution remains remote: openfloor's Worker, D1, Durable Objects, Workflows, Sandbox, R2, and GitHub integration remain authoritative. A local Git bridge may materialize the authoritative candidate in a user's existing clone.
 
 ## Invariants
 
@@ -33,4 +33,8 @@ This repository owns the private `openfloor` command-line and terminal client. A
 
 Run `npm run check` before handoff. Any durable architecture, security, command-contract, release, or workflow decision must update this file and `docs/architecture.md` in the same change.
 
-Tested API contract source: openfloor commit `f902b8f9d435255cbf1fa8e3e219314a40a96018` (2026-08-30).
+Tested API contract source: openfloor commit `f6cdccc3074b841d07fcbc4a3731b925699fbb43` (2026-08-28).
+
+## Public source and releases
+
+The source uses Apache-2.0. Package `private: true` prevents accidental npm-registry publication; GitHub release archives carry LICENSE, NOTICE, THIRD_PARTY_NOTICES.md, and SECURITY.md. Full-history secret scanning uses a checksum-pinned Gitleaks binary with redacted output. Check jobs use read-only permissions and do not persist checkout credentials. Release tags must match the package version; the full macOS/Linux check and package-install matrix gates the release-only write permission. Source publication, release tags, and repository visibility changes require maintainer authorization. See CONTRIBUTING.md, SECURITY.md, and docs/release.md.

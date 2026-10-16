@@ -4,3 +4,13 @@ coverage/
 *.tgz
 .DS_Store
 *.log
+
+# Local credentials and release scratch files
+.env
+.env.*
+!.env.example
+.dev.vars*
+*.pem
+*.key
+auth.json
+SHA256SUMS

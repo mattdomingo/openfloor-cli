@@ -1,6 +1,6 @@
 # openfloor CLI
 
-Private keyboard-first CLI and TUI for [openfloor](https://app.opnflr.com).
+Keyboard-first CLI and TUI for [openfloor](https://github.com/mattdomingo/openfloor), licensed under [Apache 2.0](LICENSE).
 
 ## Requirements
 
@@ -9,7 +9,12 @@ Private keyboard-first CLI and TUI for [openfloor](https://app.opnflr.com).
 
 ## Install
 
+Build from this repository, or use a tarball attached to a GitHub release:
+
 ```bash
+npm ci
+npm run build
+npm pack
 npm install -g ./openfloor-cli-0.1.0.tgz
 openfloor
 ```
@@ -52,8 +57,8 @@ Prompt input has focus by default. Whatever holds focus is drawn with a doubled 
 ## Local development
 
 ```bash
-npm install
-npm run dev
+npm ci
+npm run dev -- --help
 npm run check
 ```
 
@@ -61,4 +66,13 @@ Use `OPENFLOOR_BASE_URL=http://localhost:3000` for an openfloor development Work
 
 See [architecture](docs/architecture.md), [security](docs/security.md), [commands](docs/commands.md), [key map](docs/keymap.md), [development](docs/development.md), and [release](docs/release.md).
 
-API contracts were verified against openfloor commit `f902b8f9d435255cbf1fa8e3e219314a40a96018` on 2026-08-30. Additive response fields remain compatible; missing or wrongly typed required fields produce an actionable compatibility error.
+API contracts were verified against openfloor commit `f6cdccc3074b841d07fcbc4a3731b925699fbb43` on 2026-08-28. Additive response fields remain compatible; missing or wrongly typed required fields produce an actionable compatibility error.
+
+
+## Contributing and releases
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and the [release workflow](docs/release.md). Release tarballs include the license and attribution notices. `private: true` prevents accidental npm-registry publication; it does not restrict the Apache-licensed source or GitHub release archives.
+
+## License
+
+[Apache License 2.0](LICENSE). See [NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for attribution and dependency licensing.

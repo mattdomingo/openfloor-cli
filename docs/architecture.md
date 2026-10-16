@@ -37,3 +37,7 @@ Credential status reads fingerprints only. Secret entry state is cleared on subm
 - Remote strings are stripped of ANSI and unsafe control bytes.
 - Destructive commands require interactive confirmation or `--yes`.
 - Config stores only origin, current session, color preference, non-secret setup version, and local-root/session bindings with owner-only permissions. Logout preserves origin/color while clearing identity-bound fields and the isolated cloudflared home.
+
+## Source distribution
+
+The project source is Apache-2.0. npm publication remains disabled; GitHub release tarballs include license, attribution, dependency notices, and security-reporting instructions. Full-history secret scanning runs as part of reusable checks. macOS/Linux validation and tarball installation gate release tags; the tag must match package.json, and only the release job receives write permission. Checkout/action references are pinned and credentials are not persisted. API compatibility metadata records the fixture's tested server commit; changing that metadata requires evidence, not a version-only claim.

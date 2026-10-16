@@ -2,27 +2,44 @@ name: Check
 
 on:
   push:
+    branches: ["**"]
   pull_request:
+  workflow_call:
+
+permissions:
+  contents: read
 
 jobs:
+  secret_scan:
+    uses: ./.github/workflows/secrets.yml
   check:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          node-version: 22.13.0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
           cache: npm
+      - run: npm install -g npm@11.19.1
       - run: npm ci
       - run: npm run check
       - run: npm pack
-      - name: Tarball install smoke
+      - name: Tarball contents and installation smoke
         shell: bash
         run: |
+          set -euo pipefail
+          for file in LICENSE NOTICE THIRD_PARTY_NOTICES.md SECURITY.md; do
+            tar -tzf ./openfloor-cli-*.tgz "package/$file" > /dev/null
+          done
           prefix="$(mktemp -d)"
+          trap 'rm -rf "$prefix"' EXIT
           npm install --global --prefix "$prefix" ./openfloor-cli-*.tgz
           "$prefix/bin/openfloor" --version
           "$prefix/bin/openfloor" --help

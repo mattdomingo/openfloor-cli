@@ -1,12 +1,20 @@
 {
   "name": "@openfloor/cli",
   "version": "0.1.0",
-  "description": "Private command-line and terminal interface for openfloor",
+  "description": "Command-line and terminal interface for openfloor",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mattdomingo/openfloor-cli.git"
+  },
+  "bugs": { "url": "https://github.com/mattdomingo/openfloor-cli/issues" },
+  "homepage": "https://github.com/mattdomingo/openfloor-cli#readme",
+  "packageManager": "npm@11.19.1",
   "private": true,
   "type": "module",
   "engines": { "node": ">=22.13.0" },
   "bin": { "openfloor": "dist/index.js" },
-  "files": ["dist", "README.md", "docs"],
+  "files": ["dist", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "SECURITY.md", "docs"],
   "scripts": {
     "build": "tsup",
     "dev": "tsx src/index.tsx",
