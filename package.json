@@ -45,7 +45,7 @@
     "ink-testing-library": "^4.0.0",
     "tsx": "^4.20.0",
     "tsup": "^8.5.0",
-    "typescript": "^5.9.0",
+    "typescript": "^7.0.2",
     "typescript-eslint": "^8.48.0",
     "vitest": "^4.0.0"
   }
