@@ -43,7 +43,7 @@
     "eslint": "^9.39.0",
     "eslint-plugin-react-hooks": "^7.0.1",
     "ink-testing-library": "^4.0.0",
-    "tsx": "^4.20.0",
+    "tsx": "^4.23.15",
     "tsup": "^8.5.0",
     "typescript": "^5.9.0",
     "typescript-eslint": "^8.48.0",
